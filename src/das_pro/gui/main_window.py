@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -62,7 +63,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DAS_pro — ETH_DAS")
         self.resize(1400, 860)
-        self.setMinimumSize(1180, 760)
+        self.setMinimumSize(1000, 640)
 
         self.port = DEFAULT_PORT
         self._client: DasClient | None = None
@@ -81,10 +82,16 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
-        left = QWidget()
-        left.setLayout(self._build_left())
-        left.setMinimumWidth(300)
-        left.setMaximumWidth(380)
+        left_inner = QWidget()
+        left_inner.setLayout(self._build_left())
+        left = QScrollArea()
+        left.setWidget(left_inner)
+        left.setWidgetResizable(True)
+        left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Width derived from actual content so fonts/DPI never clip it.
+        need = left_inner.minimumSizeHint().width() + 24  # room for scrollbar
+        left.setMinimumWidth(need)
+        left.setMaximumWidth(need + 50)
         right = QWidget()
         right.setLayout(self._build_right())
         right.setMinimumWidth(240)
@@ -229,7 +236,6 @@ class MainWindow(QMainWindow):
     def _build_center(self) -> QVBoxLayout:
         col = QVBoxLayout()
 
-        bar = QHBoxLayout()
         self.frame_num = self._spin(1, 10000, 500)
         self.save_en = QCheckBox("SaveData")
         self.display_index = QComboBox()
@@ -240,19 +246,24 @@ class MainWindow(QMainWindow):
         self.throughput_label.setMinimumWidth(90)
         self.space_time = QCheckBox("Space")
         self.region_index = self._spin(0, 1_000_000, 100)
-        for label, w in (
-            ("FrameNum", self.frame_num),
-            ("", self.save_en),
-            ("DisplayIndex", self.display_index),
-            ("ETH_Throught", self.throughput_label),
-            ("", self.space_time),
-            ("RegionIndex", self.region_index),
-        ):
-            if label:
-                bar.addWidget(QLabel(label))
-            bar.addWidget(w)
-        bar.addStretch(1)
-        col.addLayout(bar)
+
+        # Two rows; one row does not fit once Windows display scaling
+        # shrinks the logical screen width.
+        rows = (
+            (("FrameNum", self.frame_num), ("", self.save_en),
+             ("DisplayIndex", self.display_index)),
+            (("ETH_Throught", self.throughput_label), ("", self.space_time),
+             ("RegionIndex", self.region_index)),
+        )
+        for row_items in rows:
+            bar = QHBoxLayout()
+            for label, w in row_items:
+                if label:
+                    bar.addWidget(QLabel(label))
+                bar.addWidget(w)
+                bar.addSpacing(18)
+            bar.addStretch(1)
+            col.addLayout(bar)
 
         self.graph1 = pg.PlotWidget()
         self.graph2 = pg.PlotWidget()
