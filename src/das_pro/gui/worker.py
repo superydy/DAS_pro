@@ -1,10 +1,18 @@
 """Background acquisition worker.
 
-Runs the read loop off the UI thread and forwards decoded frames to the GUI via
-Qt signals, mirroring the demo's ReadDataThread.
+Runs the read loop off the UI thread (mirroring the demo's ReadDataThread).
+
+Frames can arrive faster than the GUI can plot them, so the worker conflates:
+it keeps only the latest frame and emits at most one pending `frame_ready`
+notification at a time. The GUI fetches the newest frame with `take_latest()`.
+Without this, queued cross-thread signals pile up unboundedly and freeze the
+UI. Recording is done here in the worker so disk capture never drops frames
+regardless of plot speed.
 """
 
+import threading
 from dataclasses import dataclass
+from typing import BinaryIO
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
@@ -23,18 +31,36 @@ class StreamSettings:
 class AcquisitionWorker(QObject):
     """Owns the read loop. Move to a QThread and call run()."""
 
-    frame_ready = Signal(object, object)  # (FrameHeader, np.ndarray)
+    frame_ready = Signal()  # fetch the actual frame with take_latest()
     error = Signal(str)
     finished = Signal()
 
-    def __init__(self, client: DasClient, settings: StreamSettings):
+    def __init__(
+        self,
+        client: DasClient,
+        settings: StreamSettings,
+        record_file: BinaryIO | None = None,
+    ):
         super().__init__()
         self._client = client
         self._settings = settings
+        self._record_file = record_file
         self._running = True
+        self._lock = threading.Lock()
+        self._latest = None
+        self._notified = False
+        self._recv_count = 0
 
     def stop(self) -> None:
         self._running = False
+
+    def take_latest(self):
+        """Return ((header, data) | None, total mass-data frames received)."""
+        with self._lock:
+            item = self._latest
+            self._notified = False
+            count = self._recv_count
+        return item, count
 
     def run(self) -> None:
         cfg = AcquisitionConfig(
@@ -46,7 +72,19 @@ class AcquisitionWorker(QObject):
                 header, data = self._client.read_frame(cfg)
                 if not self._running:
                     break
-                self.frame_ready.emit(header, data)
+
+                if header.data_type <= DataType.PHASE:
+                    self._recv_count += 1
+
+                if self._record_file is not None:
+                    self._record_file.write(np.asarray(data).tobytes())
+
+                with self._lock:
+                    self._latest = (header, data)
+                    notify = not self._notified
+                    self._notified = True
+                if notify:
+                    self.frame_ready.emit()
         except DeviceError as exc:
             if self._running:
                 self.error.emit(str(exc))

@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements-dev.txt pyinstaller
 
       - name: Run tests
         run: python -m pytest -q

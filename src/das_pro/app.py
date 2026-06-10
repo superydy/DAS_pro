@@ -5,8 +5,8 @@ Usage:
     python -m das_pro.app --simulator     # also start an in-process board simulator
 
 When --simulator is given, a fake ETH-5520 is started on 127.0.0.1 so the full
-application can be exercised without hardware. Point the connection field at that
-address (the default) and press 开始采集.
+application can be exercised without hardware. The board-address fields are
+pre-filled with the simulator's address; press START.
 """
 
 import argparse
@@ -36,8 +36,9 @@ def main() -> int:
 
     window = MainWindow()
     if args.simulator:
-        window.ip_edit.setText("127.0.0.1")
-        window.port_spin.setValue(args.sim_port)
+        for spin, octet in zip(window.ip_octets, (127, 0, 0, 1)):
+            spin.setValue(octet)
+        window.port = args.sim_port
     window.show()
     return app.exec()
 
