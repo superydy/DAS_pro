@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DAS_pro — ETH_DAS")
         self.resize(1400, 860)
+        self.setMinimumSize(1180, 760)
 
         self.port = DEFAULT_PORT
         self._client: DasClient | None = None
@@ -79,9 +81,17 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
-        root.addLayout(self._build_left(), 0)
+        left = QWidget()
+        left.setLayout(self._build_left())
+        left.setMinimumWidth(300)
+        left.setMaximumWidth(380)
+        right = QWidget()
+        right.setLayout(self._build_right())
+        right.setMinimumWidth(240)
+        right.setMaximumWidth(300)
+        root.addWidget(left, 0)
         root.addLayout(self._build_center(), 1)
-        root.addLayout(self._build_right(), 0)
+        root.addWidget(right, 0)
 
     # --- left column ---
 
@@ -223,9 +233,11 @@ class MainWindow(QMainWindow):
         self.frame_num = self._spin(1, 10000, 500)
         self.save_en = QCheckBox("SaveData")
         self.display_index = QComboBox()
+        self.display_index.setMinimumWidth(60)
         self.display_index.addItem("01", 0)
         self.display_index.addItem("23", 1)
         self.throughput_label = QLabel("0.00 MB/s")
+        self.throughput_label.setMinimumWidth(90)
         self.space_time = QCheckBox("Space")
         self.region_index = self._spin(0, 1_000_000, 100)
         for label, w in (
@@ -269,14 +281,14 @@ class MainWindow(QMainWindow):
     def _build_right(self) -> QVBoxLayout:
         col = QVBoxLayout()
 
-        info = QGroupBox("帧信息")
+        info = QGroupBox("帧信息 (板卡上报, 只读)")
         f = QFormLayout(info)
-        self.lbl_identifier = QLabel("0")
-        self.lbl_data_type = QLabel("0")
-        self.lbl_frame_num = QLabel("0")
-        self.lbl_point_num = QLabel("0")
-        self.lbl_read_points = QLabel("0")
-        self.lbl_frame_cnt = QLabel("0")
+        self.lbl_identifier = self._readout()
+        self.lbl_data_type = self._readout()
+        self.lbl_frame_num = self._readout()
+        self.lbl_point_num = self._readout()
+        self.lbl_read_points = self._readout()
+        self.lbl_frame_cnt = self._readout()
         f.addRow("Identifier", self.lbl_identifier)
         f.addRow("DataType", self.lbl_data_type)
         f.addRow("FrameNum", self.lbl_frame_num)
@@ -325,7 +337,17 @@ class MainWindow(QMainWindow):
         s.setSingleStep(step)
         if suffix:
             s.setSuffix(suffix)
+        s.setMinimumWidth(85)
         return s
+
+    @staticmethod
+    def _readout() -> QLineEdit:
+        e = QLineEdit("0")
+        e.setReadOnly(True)
+        e.setAlignment(Qt.AlignmentFlag.AlignRight)
+        e.setMaximumWidth(110)
+        e.setStyleSheet("background:#f4f4f4")
+        return e
 
     # ----------------------------------------------------------- behavior
 
