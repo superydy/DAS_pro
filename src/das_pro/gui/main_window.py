@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime
 
 import numpy as np
@@ -486,15 +487,26 @@ class MainWindow(QMainWindow):
 
     # --- recording ---
 
+    @staticmethod
+    def _save_dir() -> str:
+        """save_data anchored next to the executable, not the launch directory."""
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.getcwd()
+        return os.path.join(base, "save_data")
+
     def _open_recording(self) -> None:
-        os.makedirs("save_data", exist_ok=True)
+        save_dir = self._save_dir()
+        os.makedirs(save_dir, exist_ok=True)
         self._file_index += 1
         stamp = datetime.now().strftime("%H-%M-%S")
-        base = os.path.join("save_data", f"{self._file_index}-{stamp}_D")
+        base = os.path.join(save_dir, f"{self._file_index}-{stamp}_D")
         self._recording_file = open(base + ".bin", "wb")
         self._meta_path = base + ".json"
         self._meta = self._recording_metadata()
         self._write_meta()
+        self.statusBar().showMessage(f"正在录制: {os.path.abspath(base + '.bin')}")
 
     def _recording_metadata(self) -> dict:
         """Everything needed to interpret the .bin afterwards."""
@@ -553,6 +565,7 @@ class MainWindow(QMainWindow):
             self._meta["stopped_at"] = datetime.now().isoformat(timespec="seconds")
             self._meta["frames_received"] = self._frame_count
             self._write_meta()
+            self.statusBar().showMessage(f"录制完成: {os.path.abspath(self._meta_path).replace('.json', '.bin')}")
 
     # --- frame handling ---
 
