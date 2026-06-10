@@ -7,3 +7,5 @@ venv/
 build/
 dist/
 save_data/
+dist/
+*.spec.bak

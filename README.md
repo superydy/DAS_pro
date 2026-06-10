@@ -83,6 +83,24 @@ is identical; only the endpoint changes.
 PYTHONPATH=src python -m das_pro.app
 ```
 
+## Building a standalone .exe
+
+The app ships as a single-file desktop executable — no Python required on the
+target machine.
+
+**Option A — download from CI:** every push builds `DAS_pro.exe` on GitHub
+Actions (workflow "Build Windows EXE"). Open the run on the Actions tab and
+download the `DAS_pro-windows` artifact.
+
+**Option B — build locally on Windows:** double-click `build_exe.bat` (or run
+`pyinstaller das_pro.spec --noconfirm`). The result is `dist\DAS_pro.exe`.
+
+Run it directly, or with the built-in simulator when no board is attached:
+
+```bat
+DAS_pro.exe --simulator
+```
+
 ## Tests
 
 ```bash
