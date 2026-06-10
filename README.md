@@ -83,6 +83,21 @@ is identical; only the endpoint changes.
 PYTHONPATH=src python -m das_pro.app
 ```
 
+## Recorded data format
+
+Enabling **SaveData** writes the raw stream to `save_data/<n>-<time>_D.bin`
+exactly as received (no conversion, bit-exact), plus a sidecar
+`<n>-<time>_D.json` capturing every acquisition parameter — data source,
+dtype, channel count, points per scan, sample rate, start/stop time and the
+number of frames received — so any recording is self-describing. The JSON
+includes a ready-to-paste numpy expression, e.g.:
+
+```python
+import numpy as np
+data = np.fromfile("save_data/1-12-00-00_D.bin", dtype="<i2")
+data = data.reshape(-1, 204, 2)   # (scans, points, channels)
+```
+
 ## Building a standalone .exe
 
 The app ships as a single-file desktop executable — no Python required on the

@@ -13,6 +13,7 @@ Layout mirrors the original ETH_DAS_DEMO control panel:
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
 
@@ -413,6 +414,7 @@ class MainWindow(QMainWindow):
     def _stop(self) -> None:
         if self._worker is not None:
             self._worker.stop()
+            _, self._frame_count = self._worker.take_latest()
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(2000)
@@ -488,13 +490,69 @@ class MainWindow(QMainWindow):
         os.makedirs("save_data", exist_ok=True)
         self._file_index += 1
         stamp = datetime.now().strftime("%H-%M-%S")
-        path = os.path.join("save_data", f"{self._file_index}-{stamp}_D.bin")
-        self._recording_file = open(path, "wb")
+        base = os.path.join("save_data", f"{self._file_index}-{stamp}_D")
+        self._recording_file = open(base + ".bin", "wb")
+        self._meta_path = base + ".json"
+        self._meta = self._recording_metadata()
+        self._write_meta()
+
+    def _recording_metadata(self) -> dict:
+        """Everything needed to interpret the .bin afterwards."""
+        is_phase = self.data_src.currentData() == DataSrc.PHASE
+        if not is_phase:
+            dtype = "<i2"
+            points_per_scan = self.point_num.value()
+            sample_rate_hz = self._current_sample_rate()
+        else:
+            dtype = "<i2" if self.phase_bits.currentData() == 1 else "<i4"
+            points_per_scan = max(
+                self.point_num.value() // max(self.space_merge.value(), 1), 1
+            )
+            sample_rate_hz = self._phase_sample_rate()
+        channels = self.ch_num.currentData()
+        return {
+            "software": "DAS_pro",
+            "board": "ETH-5520",
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "data_src": self.data_src.currentText(),
+            "data_src_value": int(self.data_src.currentData()),
+            "dtype": dtype,
+            "channels": channels,
+            "points_per_scan": points_per_scan,
+            "scans_per_upload": self.frame_num.value(),
+            "sample_rate_hz": sample_rate_hz,
+            "trig_freq_hz": self.trig_freq.value(),
+            "trig_pulse_width_ns": self.trig_width.value(),
+            "total_point_num": self.point_num.value(),
+            "bypass_point_num": self.bypass_point.value(),
+            "upload_rate_sel": self.upload_rate.currentData(),
+            "center_freq_hz": self.center_freq.value() * 1_000_000,
+            "phase_bits": self.phase_bits.currentText(),
+            "trig_freq_dec_ratio": self.dec_ratio.value(),
+            "space_avg_order": self.space_avg.value(),
+            "space_merge_points": self.space_merge.value(),
+            "region_diff_order": self.region_diff.value(),
+            "detrend_filter_bw_hz": self.detrend_bw.value(),
+            "polarization_diversity": self.polar_div.currentText(),
+            "fiber_len_km": float(self.fiber_len.text().split()[0]),
+            "layout": "scan-major; channels interleaved per point",
+            "numpy_example": (
+                f"np.fromfile(f, dtype='{dtype}')"
+                f".reshape(-1, {points_per_scan}, {channels})"
+            ),
+        }
+
+    def _write_meta(self) -> None:
+        with open(self._meta_path, "w", encoding="utf-8") as f:
+            json.dump(self._meta, f, ensure_ascii=False, indent=2)
 
     def _close_recording(self) -> None:
         if self._recording_file is not None:
             self._recording_file.close()
             self._recording_file = None
+            self._meta["stopped_at"] = datetime.now().isoformat(timespec="seconds")
+            self._meta["frames_received"] = self._frame_count
+            self._write_meta()
 
     # --- frame handling ---
 
