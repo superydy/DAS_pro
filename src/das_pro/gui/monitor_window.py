@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover
 
 from ..dsp.detect import detect_peak, vibration_activity
 from ..dsp.spectrum import power_spectrum_dbm
+from .plotutil import make_zoomable, set_labels
 
 _WAVE_SECONDS = 8.0  # rolling time-waveform window
 _SPECTRUM_SAMPLES = 4096
@@ -126,12 +127,20 @@ class MonitorWindow(QWidget):
         self.det_label.setStyleSheet("font-weight:bold;color:#808080")
         col.addWidget(self.det_label)
 
-        self.graph_act = pg.PlotWidget(title="振动强度分布（横轴=光纤位置）")
+        self.graph_act = pg.PlotWidget(title="振动强度分布")
         self.graph_wave = pg.PlotWidget(title="监测点时域波形")
         self.graph_spec = pg.PlotWidget(title="监测点频谱")
-        for gph in (self.graph_act, self.graph_wave, self.graph_spec):
+        set_labels(self.graph_act, "光纤位置序号", "活动强度（相位帧间变化）")
+        set_labels(self.graph_wave, "时间 (秒)", "相位（已去均值）")
+        set_labels(self.graph_spec, "频率 (Hz)", "功率 (dBm)")
+        for gph, title in (
+            (self.graph_act, "振动强度分布"),
+            (self.graph_wave, "监测点时域波形"),
+            (self.graph_spec, "监测点频谱"),
+        ):
             gph.showGrid(x=True, y=True, alpha=0.3)
             col.addWidget(gph, 1)
+            make_zoomable(gph, title, col, 1)
         self._thr_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#ff3030", style=Qt.PenStyle.DashLine))
         self._peak_line = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ff3030"))
         self.graph_act.addItem(self._thr_line)

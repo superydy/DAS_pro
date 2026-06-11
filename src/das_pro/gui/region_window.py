@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..dsp.detect import detect_events, vibration_activity
+from .plotutil import make_zoomable, set_labels
 
 _WATERFALL_ROWS = 240   # history depth (newest at the bottom)
 _WAVE_SECONDS = 8.0
@@ -106,19 +107,27 @@ class RegionWindow(QWidget):
         self.det_label.setStyleSheet("font-weight:bold;color:#808080")
         col.addWidget(self.det_label)
 
-        self.graph_act = pg.PlotWidget(title="振动强度分布（横轴=光纤位置）")
+        self.graph_act = pg.PlotWidget(title="振动强度分布")
         self.graph_act.showGrid(x=True, y=True, alpha=0.3)
+        set_labels(self.graph_act, "光纤位置序号", "活动强度（相位帧间变化）")
         self._thr_line = pg.InfiniteLine(
             angle=0, pen=pg.mkPen("#ff3030", style=Qt.PenStyle.DashLine)
         )
+        # cyan dashed lines show the detection range so it's obvious what
+        # part of the fiber is being watched
+        self._range_lines = [
+            pg.InfiniteLine(
+                angle=90, pen=pg.mkPen("#30c0c0", style=Qt.PenStyle.DashLine)
+            )
+            for _ in range(2)
+        ]
         self._marks = pg.ScatterPlotItem(
             size=10, brush=pg.mkBrush("#ff3030"), pen=None, symbol="t1"
         )
         col.addWidget(self.graph_act, 2)
 
-        self.graph_fall = pg.PlotWidget(
-            title="瀑布图（横轴=位置，纵轴=时间，亮=振动）"
-        )
+        self.graph_fall = pg.PlotWidget(title="瀑布图（亮=振动）")
+        set_labels(self.graph_fall, "光纤位置序号", "时间（行，新数据在下）")
         self.graph_fall.getPlotItem().getViewBox().invertY(True)  # newest at bottom
         self._img = pg.ImageItem(axisOrder="row-major")
         self._img.setColorMap(pg.colormap.get("inferno"))
@@ -127,7 +136,12 @@ class RegionWindow(QWidget):
 
         self.graph_wave = pg.PlotWidget(title="选中点时域波形")
         self.graph_wave.showGrid(x=True, y=True, alpha=0.3)
+        set_labels(self.graph_wave, "时间 (秒)", "相位（已去均值）")
         col.addWidget(self.graph_wave, 2)
+
+        make_zoomable(self.graph_act, "振动强度分布", col, 2)
+        make_zoomable(self.graph_fall, "瀑布图", col, 3)
+        make_zoomable(self.graph_wave, "选中点时域波形", col, 2)
 
         bottom = QHBoxLayout()
 
@@ -197,10 +211,11 @@ class RegionWindow(QWidget):
             self.det_label.setStyleSheet("font-weight:bold;color:#30a030")
         self._update_event_list(events)
 
-        # waterfall row: this frame's per-position activity inside the range
+        # waterfall row: this frame's per-position activity inside the range;
+        # the image grows from the first row instead of starting all black
         row = np.zeros(points, dtype=np.float32)
         row[lo : hi + 1] = act[lo : hi + 1]
-        self._waterfall = np.vstack([self._waterfall[1:], row[None, :]])
+        self._waterfall = np.vstack([self._waterfall, row[None, :]])[-_WATERFALL_ROWS:]
 
         if self.rec_btn.isChecked():
             self._write_record(block)
@@ -217,7 +232,7 @@ class RegionWindow(QWidget):
     def _configure_positions(self, points: int) -> None:
         self._positions = points
         self._activity = None
-        self._waterfall = np.zeros((_WATERFALL_ROWS, points), dtype=np.float32)
+        self._waterfall = np.zeros((0, points), dtype=np.float32)
         for w in (self.range_lo, self.range_hi):
             w.setMaximum(points - 1)
         if self.range_hi.value() == 0:
@@ -226,6 +241,14 @@ class RegionWindow(QWidget):
     def _update_event_list(self, events: list[tuple[int, float]]) -> None:
         selected = self._wave_pos
         self.event_list.clear()
+        if not events:
+            hint = QListWidgetItem(
+                "（暂无振动点）检测不到时请检查“范围”：\n"
+                "终点应设在光纤实际终点以内，排除末端噪声区"
+            )
+            hint.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.event_list.addItem(hint)
+            return
         for pos, val in events:
             item = QListWidgetItem(f"位置 {pos}（强度 {val:.0f}）")
             item.setData(Qt.ItemDataRole.UserRole, pos)
@@ -242,16 +265,20 @@ class RegionWindow(QWidget):
         self.graph_act.clear()
         self.graph_act.addItem(self._thr_line)
         self.graph_act.addItem(self._marks)
+        for line, pos in zip(self._range_lines, (lo, hi)):
+            self.graph_act.addItem(line)
+            line.setValue(pos)
         self.graph_act.plot(self._activity, pen="#ffff00")
         self._thr_line.setValue(threshold)
         self._marks.setData(
             [p for p, _ in events], [v for _, v in events]
         )
 
-        peak = float(self._waterfall.max())
-        self._img.setImage(
-            self._waterfall, autoLevels=False, levels=(0.0, max(peak, 1.0))
-        )
+        if len(self._waterfall):
+            peak = float(self._waterfall.max())
+            self._img.setImage(
+                self._waterfall, autoLevels=False, levels=(0.0, max(peak, 1.0))
+            )
 
         self.graph_wave.clear()
         t = np.arange(len(self._wave_buf)) / self._fs

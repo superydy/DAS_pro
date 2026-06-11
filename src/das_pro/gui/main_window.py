@@ -55,6 +55,7 @@ from .params import (
     fiber_len_km,
     throughput_mb_s,
 )
+from .plotutil import make_zoomable, set_labels as _label
 from .region_window import RegionWindow
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
@@ -142,8 +143,11 @@ class MainWindow(QMainWindow):
         self.graph2 = pg.PlotWidget(title="图2 · 通道1 波形 / 频谱")
         for gph in (self.graph1, self.graph2):
             gph.showGrid(x=True, y=True, alpha=0.3)
+            _label(gph, "采样点序号（对应光纤位置）", "幅度（ADC 码值）")
         col.addWidget(self.graph1, 3)
         col.addWidget(self.graph2, 3)
+        make_zoomable(self.graph1, "图1 · 通道0 波形", col, 3)
+        make_zoomable(self.graph2, "图2 · 通道1 波形 / 频谱", col, 3)
 
         mon_bar = QHBoxLayout()
         mon_bar.addWidget(QLabel("幅度监测"))
@@ -157,7 +161,9 @@ class MainWindow(QMainWindow):
 
         self.graph_mon = pg.PlotWidget(title="图3 · 光纤回波强度")
         self.graph_mon.showGrid(x=True, y=True, alpha=0.3)
+        _label(self.graph_mon, "光纤位置序号", "回波强度")
         col.addWidget(self.graph_mon, 2)
+        make_zoomable(self.graph_mon, "图3 · 光纤回波强度", col, 2)
         return col
 
     def _build_right(self) -> QVBoxLayout:
@@ -617,6 +623,7 @@ class MainWindow(QMainWindow):
             channels = [channels[base], channels[base + 1]]
 
         self.graph1.clear()
+        _label(self.graph1, "采样点序号（对应光纤位置）", "幅度（ADC 码值，约±2048）")
         self.graph1.plot(channels[0][:points], pen=_PLOT_PENS[0])
 
         self.graph2.clear()
@@ -624,8 +631,11 @@ class MainWindow(QMainWindow):
             spec, df = power_spectrum_dbm(
                 channels[0][:points], self.acq.sample_rate, self.psd_en.isChecked()
             )
+            unit = "功率谱密度 (dBm/Hz)" if self.psd_en.isChecked() else "功率 (dBm)"
+            _label(self.graph2, "频率 (Hz)", unit)
             self.graph2.plot(np.arange(len(spec)) * df, spec, pen=_PLOT_PENS[0])
         elif len(channels) > 1:
+            _label(self.graph2, "采样点序号（对应光纤位置）", "幅度（ADC 码值，约±2048）")
             self.graph2.plot(channels[1][:points], pen=_PLOT_PENS[1])
 
     def _plot_phase_time(self, data, header, ch) -> None:
@@ -640,6 +650,8 @@ class MainWindow(QMainWindow):
 
         self.graph1.clear()
         self.graph2.clear()
+        for gph in (self.graph1, self.graph2):
+            _label(gph, "光纤位置序号（合并后）", "相位（原始码值）")
         for i in range(n_scans):
             self.graph1.plot(scans[i, :, 0], pen=_PLOT_PENS[i])
             if ch > 1:
@@ -657,17 +669,22 @@ class MainWindow(QMainWindow):
 
         self.graph1.clear()
         self.graph2.clear()
+        _label(self.graph1, "扫描序号（时间方向）", "相位（原始码值）")
         self.graph1.plot(series[:, 0], pen=_PLOT_PENS[0])
         if ch > 1:
+            _label(self.graph2, "扫描序号（时间方向）", "相位（原始码值）")
             self.graph2.plot(series[:, 1], pen=_PLOT_PENS[1])
         else:
             spec, df = power_spectrum_dbm(
                 series[:, 0], self.acq.phase_sample_rate, self.psd_en.isChecked()
             )
+            unit = "功率谱密度 (dBm/Hz)" if self.psd_en.isChecked() else "功率 (dBm)"
+            _label(self.graph2, "频率 (Hz)", unit)
             self.graph2.plot(np.arange(len(spec)) * df, spec, pen=_PLOT_PENS[1])
 
     def _plot_monitor(self, data, ch) -> None:
         self.graph_mon.clear()
+        _label(self.graph_mon, "光纤位置序号", "回波强度")
         channels = deinterleave(np.asarray(data), ch)
         if self.ch0_amp_disp.isChecked():
             self.graph_mon.plot(channels[0], pen=_MON_PENS[0])
