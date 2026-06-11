@@ -39,11 +39,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..dsp.detect import detect_events, vibration_activity
+from ..dsp.detect import detect_relative, vibration_activity
 from .plotutil import make_zoomable, set_labels
 
 _WATERFALL_ROWS = 240   # history depth (newest at the bottom)
 _WAVE_SECONDS = 8.0
+_WARMUP_FEEDS = 5       # frames spent learning the baseline before alarming
+_ALPHA_QUIET = 0.05     # baseline tracking speed for quiet positions
+_ALPHA_TRIGGERED = 0.005  # much slower while alarming, so alarms persist
 
 
 class RegionWindow(QWidget):
@@ -57,10 +60,12 @@ class RegionWindow(QWidget):
         self._default_dir = save_dir
         self._fs = 2000.0
         self._positions = 0
-        self._activity: np.ndarray | None = None
+        self._baseline: np.ndarray | None = None
+        self._warmup = 0
         self._waterfall: np.ndarray | None = None
         self._wave_buf = np.zeros(0)
         self._wave_pos = -1
+        self._last_sel = -1
 
         self._rec_path = ""
         self._rec_file = None
@@ -69,6 +74,12 @@ class RegionWindow(QWidget):
         self._rec_lo = 0
         self._rec_hi = 0
         self._rec_scans = 0
+
+        # accumulated event log: ongoing vibrations update their row
+        # instead of spamming one row per frame
+        self._feed_count = 0
+        self._active_events: dict[int, dict] = {}
+        self._hint_item = None
 
         self._build_ui()
 
@@ -89,9 +100,12 @@ class RegionWindow(QWidget):
             w.setMinimumWidth(80)
             w.setToolTip("只监测该位置区间，终点设在光纤实际终点以内")
         self.thresh = QDoubleSpinBox()
-        self.thresh.setRange(1.0, 1000.0)
-        self.thresh.setValue(6.0)
-        self.thresh.setToolTip("活动度超过区间中位数的几倍判定为振动")
+        self.thresh.setRange(1.1, 1000.0)
+        self.thresh.setValue(4.0)
+        self.thresh.setToolTip(
+            "每个位置和它自己安静时的基线比：超过基线的几倍判定为振动。\n"
+            "常噪声区（光纤前端、终点之外）基线本身就高，不会误报"
+        )
         for label, w in (
             ("通道", self.ch_combo),
             ("范围", self.range_lo),
@@ -107,26 +121,17 @@ class RegionWindow(QWidget):
         self.det_label.setStyleSheet("font-weight:bold;color:#808080")
         col.addWidget(self.det_label)
 
-        self.graph_act = pg.PlotWidget(title="振动强度分布")
+        self.graph_act = pg.PlotWidget(
+            title="振动强度分布（黄=当前，红虚线=报警线；只画监测范围）"
+        )
         self.graph_act.showGrid(x=True, y=True, alpha=0.3)
         set_labels(self.graph_act, "光纤位置序号", "活动强度（相位帧间变化）")
-        self._thr_line = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen("#ff3030", style=Qt.PenStyle.DashLine)
-        )
-        # cyan dashed lines show the detection range so it's obvious what
-        # part of the fiber is being watched
-        self._range_lines = [
-            pg.InfiniteLine(
-                angle=90, pen=pg.mkPen("#30c0c0", style=Qt.PenStyle.DashLine)
-            )
-            for _ in range(2)
-        ]
         self._marks = pg.ScatterPlotItem(
             size=10, brush=pg.mkBrush("#ff3030"), pen=None, symbol="t1"
         )
         col.addWidget(self.graph_act, 2)
 
-        self.graph_fall = pg.PlotWidget(title="瀑布图（亮=振动）")
+        self.graph_fall = pg.PlotWidget(title="瀑布图（亮=超过自身基线的倍数）")
         set_labels(self.graph_fall, "光纤位置序号", "时间（行，新数据在下）")
         self.graph_fall.getPlotItem().getViewBox().invertY(True)  # newest at bottom
         self._img = pg.ImageItem(axisOrder="row-major")
@@ -145,7 +150,7 @@ class RegionWindow(QWidget):
 
         bottom = QHBoxLayout()
 
-        ev_box = QGroupBox("振动点列表（点击查看波形）")
+        ev_box = QGroupBox("振动事件记录（累计，最新在上；点击查看该点波形）")
         eb = QVBoxLayout(ev_box)
         self.event_list = QListWidget()
         self.event_list.setMaximumHeight(110)
@@ -174,7 +179,8 @@ class RegionWindow(QWidget):
 
     def set_stream(self, sample_rate: float) -> None:
         self._fs = max(float(sample_rate), 1.0)
-        self._activity = None
+        self._baseline = None
+        self._warmup = 0
         self._waterfall = None
         self._wave_buf = np.zeros(0)
 
@@ -187,21 +193,33 @@ class RegionWindow(QWidget):
             self._configure_positions(points)
 
         act = vibration_activity(block)
-        if self._activity is None or self._activity.shape != act.shape:
-            self._activity = act
-        else:
-            self._activity = 0.6 * self._activity + 0.4 * act
+        if self._baseline is None or self._baseline.shape != act.shape:
+            self._baseline = act.copy()
+            self._warmup = 0
+        self._warmup += 1
+
+        events, ratio = detect_relative(act, self._baseline, self.thresh.value())
 
         lo = min(self.range_lo.value(), points - 1)
         hi = min(self.range_hi.value(), points - 1)
         if hi < lo:
             lo, hi = hi, lo
-        events, threshold = detect_events(
-            self._activity[lo : hi + 1], self.thresh.value()
-        )
-        events = [(lo + pos, val) for pos, val in events]
+        events = [(p, v) for p, v in events if lo <= p <= hi]
+        if self._warmup <= _WARMUP_FEEDS:
+            events = []
 
-        if events:
+        # baseline learns the quiet level of each position; it adapts
+        # slowly where an alarm is active so ongoing vibrations keep
+        # alarming instead of being absorbed into "normal"
+        alpha = np.where(
+            ratio > self.thresh.value(), _ALPHA_TRIGGERED, _ALPHA_QUIET
+        )
+        self._baseline = (1.0 - alpha) * self._baseline + alpha * act
+
+        if self._warmup <= _WARMUP_FEEDS:
+            self.det_label.setText("正在学习背景基线…（几秒后开始检测）")
+            self.det_label.setStyleSheet("font-weight:bold;color:#c08000")
+        elif events:
             head = "、".join(str(p) for p, _ in events[:6])
             more = f" 等{len(events)}处" if len(events) > 6 else ""
             self.det_label.setText(f"⚠ 检测到 {len(events)} 个振动点：{head}{more}")
@@ -211,10 +229,10 @@ class RegionWindow(QWidget):
             self.det_label.setStyleSheet("font-weight:bold;color:#30a030")
         self._update_event_list(events)
 
-        # waterfall row: this frame's per-position activity inside the range;
-        # the image grows from the first row instead of starting all black
+        # waterfall row: how many times each position exceeds its own
+        # baseline (1 = quiet); independent of absolute noise levels
         row = np.zeros(points, dtype=np.float32)
-        row[lo : hi + 1] = act[lo : hi + 1]
+        row[lo : hi + 1] = ratio[lo : hi + 1]
         self._waterfall = np.vstack([self._waterfall, row[None, :]])[-_WATERFALL_ROWS:]
 
         if self.rec_btn.isChecked():
@@ -223,61 +241,94 @@ class RegionWindow(QWidget):
         sel = self._wave_pos if 0 <= self._wave_pos < points else (
             events[0][0] if events else lo
         )
+        if sel != self._last_sel:
+            self._wave_buf = np.zeros(0)  # don't mix two positions' history
+            self._last_sel = sel
         series = block[:, sel] - block[:, sel].mean()
         maxlen = int(self._fs * _WAVE_SECONDS)
         self._wave_buf = np.concatenate([self._wave_buf, series])[-maxlen:]
 
-        self._plot(events, threshold, lo, hi, sel)
+        self._plot(events, act, lo, hi, sel)
 
     def _configure_positions(self, points: int) -> None:
         self._positions = points
-        self._activity = None
+        self._baseline = None
         self._waterfall = np.zeros((0, points), dtype=np.float32)
         for w in (self.range_lo, self.range_hi):
             w.setMaximum(points - 1)
         if self.range_hi.value() == 0:
             self.range_hi.setValue(points - 1)
 
+    # --- accumulated event log ---
+
     def _update_event_list(self, events: list[tuple[int, float]]) -> None:
-        selected = self._wave_pos
-        self.event_list.clear()
-        if not events:
-            hint = QListWidgetItem(
-                "（暂无振动点）检测不到时请检查“范围”：\n"
-                "终点应设在光纤实际终点以内，排除末端噪声区"
-            )
-            hint.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.event_list.addItem(hint)
-            return
+        """Append new vibrations as history rows; ongoing ones update in place."""
+        self._feed_count += 1
+
+        if self._hint_item is None and self.event_list.count() == 0 and not events:
+            self._hint_item = QListWidgetItem("（暂无振动事件）")
+            self._hint_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.event_list.addItem(self._hint_item)
+
         for pos, val in events:
-            item = QListWidgetItem(f"位置 {pos}（强度 {val:.0f}）")
-            item.setData(Qt.ItemDataRole.UserRole, pos)
-            self.event_list.addItem(item)
-            if pos == selected:
-                item.setSelected(True)
+            rep = next(
+                (r for r in self._active_events if abs(r - pos) <= 3), None
+            )
+            if rep is None:
+                if self._hint_item is not None:
+                    self.event_list.takeItem(self.event_list.row(self._hint_item))
+                    self._hint_item = None
+                stamp = datetime.now().strftime("%H:%M:%S")
+                item = QListWidgetItem(f"{stamp}  位置 {pos}（强度 {val:.0f}）")
+                item.setData(Qt.ItemDataRole.UserRole, pos)
+                self.event_list.insertItem(0, item)
+                self._active_events[pos] = {
+                    "item": item, "last": self._feed_count, "peak": val,
+                    "stamp": stamp,
+                }
+            else:
+                entry = self._active_events[rep]
+                entry["last"] = self._feed_count
+                if val > entry["peak"]:
+                    entry["peak"] = val
+                    entry["item"].setText(
+                        f"{entry['stamp']}  位置 {rep}（峰值强度 {val:.0f}）"
+                    )
+
+        # an event ends after a few quiet frames; its row stays as history
+        for rep in list(self._active_events):
+            if self._feed_count - self._active_events[rep]["last"] > 5:
+                del self._active_events[rep]
+
+        while self.event_list.count() > 200:
+            self.event_list.takeItem(200)
 
     def _on_event_clicked(self, item: QListWidgetItem) -> None:
-        self._wave_pos = int(item.data(Qt.ItemDataRole.UserRole))
-        self._wave_buf = np.zeros(0)
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data is None:
+            return
+        self._wave_pos = int(data)
         self.graph_wave.setTitle(f"选中点时域波形 — 位置 {self._wave_pos}")
 
-    def _plot(self, events, threshold, lo, hi, sel) -> None:
+    def _plot(self, events, act, lo, hi, sel) -> None:
+        # only the watched range is drawn, so the scale isn't dominated
+        # by the always-noisy stretches outside it
+        x = np.arange(lo, hi + 1)
         self.graph_act.clear()
-        self.graph_act.addItem(self._thr_line)
         self.graph_act.addItem(self._marks)
-        for line, pos in zip(self._range_lines, (lo, hi)):
-            self.graph_act.addItem(line)
-            line.setValue(pos)
-        self.graph_act.plot(self._activity, pen="#ffff00")
-        self._thr_line.setValue(threshold)
-        self._marks.setData(
-            [p for p, _ in events], [v for _, v in events]
+        self.graph_act.plot(x, act[lo : hi + 1], pen="#ffff00")
+        self.graph_act.plot(
+            x,
+            self._baseline[lo : hi + 1] * self.thresh.value(),
+            pen=pg.mkPen("#ff3030", style=Qt.PenStyle.DashLine),
         )
+        self._marks.setData([p for p, _ in events], [act[p] for p, _ in events])
 
         if len(self._waterfall):
-            peak = float(self._waterfall.max())
             self._img.setImage(
-                self._waterfall, autoLevels=False, levels=(0.0, max(peak, 1.0))
+                self._waterfall,
+                autoLevels=False,
+                levels=(0.0, max(self.thresh.value() * 2.0, 2.0)),
             )
 
         self.graph_wave.clear()

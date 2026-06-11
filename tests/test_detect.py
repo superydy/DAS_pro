@@ -2,7 +2,12 @@
 
 import numpy as np
 
-from das_pro.dsp.detect import detect_events, detect_peak, vibration_activity
+from das_pro.dsp.detect import (
+    detect_events,
+    detect_peak,
+    detect_relative,
+    vibration_activity,
+)
 
 
 def _block_with_vibration(pos: int) -> np.ndarray:
@@ -68,6 +73,35 @@ def test_detect_events_groups_adjacent_positions():
 
 def test_detect_events_empty_when_quiet():
     events, _ = detect_events(np.zeros(50), 6.0)
+    assert events == []
+
+
+def test_relative_triggers_against_own_baseline():
+    baseline = np.full(100, 50.0)
+    baseline[:5] = 20000.0  # permanently-noisy demod front edge
+    activity = baseline.copy()
+    activity[40] = 800.0  # a kick: 16x its own baseline
+    events, ratio = detect_relative(activity, baseline, 4.0)
+    assert [p for p, _ in events] == [40]
+    assert ratio[40] > 4.0
+    # the hot front edge does NOT alarm: it equals its own baseline
+    assert ratio[0] < 2.0
+
+
+def test_relative_detects_whole_fiber_shaking():
+    # a coiled spool hit by a hammer raises every position at once;
+    # median-relative detection misses this, self-baseline must not
+    baseline = np.full(100, 50.0)
+    activity = baseline * 20.0
+    med_events, _ = detect_events(activity, 4.0)
+    assert med_events == []  # the old detector's blind spot
+    rel_events, _ = detect_relative(activity, baseline, 4.0)
+    assert len(rel_events) == 1  # one contiguous event covering the fiber
+
+
+def test_relative_quiet_is_silent():
+    baseline = np.full(100, 50.0)
+    events, _ = detect_relative(baseline.copy(), baseline, 4.0)
     assert events == []
 
 

@@ -45,12 +45,15 @@ try:  # QtMultimedia may be missing from stripped-down installs
 except ImportError:  # pragma: no cover
     _HAS_AUDIO = False
 
-from ..dsp.detect import detect_peak, vibration_activity
+from ..dsp.detect import detect_relative, vibration_activity
 from ..dsp.spectrum import power_spectrum_dbm
 from .plotutil import make_zoomable, set_labels
 
 _WAVE_SECONDS = 8.0  # rolling time-waveform window
 _SPECTRUM_SAMPLES = 4096
+_WARMUP_FEEDS = 5       # frames spent learning the baseline before alarming
+_ALPHA_QUIET = 0.05     # baseline tracking speed for quiet positions
+_ALPHA_TRIGGERED = 0.005  # much slower while alarming, so alarms persist
 
 
 class MonitorWindow(QWidget):
@@ -64,8 +67,10 @@ class MonitorWindow(QWidget):
         self._default_dir = save_dir
         self._fs = 2000.0
         self._positions = 0
-        self._activity: np.ndarray | None = None
+        self._baseline: np.ndarray | None = None
+        self._warmup = 0
         self._wave_buf = np.zeros(0)
+        self._last_sel = -1
 
         # audio
         self._sink = None
@@ -99,9 +104,12 @@ class MonitorWindow(QWidget):
         self.auto_track = QCheckBox("自动跟踪振动点")
         self.auto_track.setChecked(True)
         self.thresh = QDoubleSpinBox()
-        self.thresh.setRange(1.0, 1000.0)
-        self.thresh.setValue(6.0)
-        self.thresh.setToolTip("活动度超过全光纤中位数的几倍判定为振动")
+        self.thresh.setRange(1.1, 1000.0)
+        self.thresh.setValue(4.0)
+        self.thresh.setToolTip(
+            "每个位置和它自己安静时的基线比：超过基线的几倍判定为振动。\n"
+            "常噪声区（光纤前端、终点之外）基线本身就高，不会误报"
+        )
         self.range_lo = QSpinBox()
         self.range_lo.setRange(0, 1_000_000)
         self.range_hi = QSpinBox()
@@ -141,11 +149,10 @@ class MonitorWindow(QWidget):
             gph.showGrid(x=True, y=True, alpha=0.3)
             col.addWidget(gph, 1)
             make_zoomable(gph, title, col, 1)
-        self._thr_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#ff3030", style=Qt.PenStyle.DashLine))
         self._peak_line = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ff3030"))
-        self.graph_act.addItem(self._thr_line)
         self.graph_act.addItem(self._peak_line)
         self._peak_line.hide()
+        self.graph_act.setTitle("振动强度分布（黄=当前，红虚线=报警线；只画监测范围）")
 
         bottom = QHBoxLayout()
 
@@ -179,7 +186,8 @@ class MonitorWindow(QWidget):
     def set_stream(self, sample_rate: float) -> None:
         """Called by the main window when acquisition (re)starts."""
         self._fs = max(float(sample_rate), 1.0)
-        self._activity = None
+        self._baseline = None
+        self._warmup = 0
         self._wave_buf = np.zeros(0)
         self._agc = 1.0
 
@@ -192,22 +200,33 @@ class MonitorWindow(QWidget):
             self._configure_positions(points)
 
         act = vibration_activity(block)
-        if self._activity is None or self._activity.shape != act.shape:
-            self._activity = act
-        else:
-            self._activity = 0.6 * self._activity + 0.4 * act
+        if self._baseline is None or self._baseline.shape != act.shape:
+            self._baseline = act.copy()
+            self._warmup = 0
+        self._warmup += 1
+
+        events, ratio = detect_relative(act, self._baseline, self.thresh.value())
 
         lo = min(self.range_lo.value(), points - 1)
         hi = min(self.range_hi.value(), points - 1)
         if hi < lo:
             lo, hi = hi, lo
-        pos_rel, threshold, hit = detect_peak(
-            self._activity[lo : hi + 1], self.thresh.value()
+        events = [(p, v) for p, v in events if lo <= p <= hi]
+        hit = bool(events) and self._warmup > _WARMUP_FEEDS
+        peak = events[0][0] if events else lo
+
+        alpha = np.where(
+            ratio > self.thresh.value(), _ALPHA_TRIGGERED, _ALPHA_QUIET
         )
-        peak = lo + pos_rel
-        if hit:
+        self._baseline = (1.0 - alpha) * self._baseline + alpha * act
+
+        if self._warmup <= _WARMUP_FEEDS:
+            self.det_label.setText("正在学习背景基线…（几秒后开始检测）")
+            self.det_label.setStyleSheet("font-weight:bold;color:#c08000")
+        elif hit:
             self.det_label.setText(
-                f"⚠ 检测到振动：位置 {peak}（强度 {self._activity[peak]:.0f}）"
+                f"⚠ 检测到振动：位置 {peak}"
+                f"（超基线 {ratio[peak]:.1f} 倍）"
             )
             self.det_label.setStyleSheet("font-weight:bold;color:#ff3030")
             if self.auto_track.isChecked() and not self.rec_btn.isChecked():
@@ -217,6 +236,9 @@ class MonitorWindow(QWidget):
             self.det_label.setStyleSheet("font-weight:bold;color:#30a030")
 
         sel = min(self.pos_spin.value(), points - 1)
+        if sel != self._last_sel:
+            self._wave_buf = np.zeros(0)  # don't mix two positions' history
+            self._last_sel = sel
         series = block[:, sel]
 
         if self.rec_btn.isChecked():
@@ -230,23 +252,29 @@ class MonitorWindow(QWidget):
         if self._sink_io is not None:
             self._play(centered)
 
-        self._plot(lo, hi, peak, hit, threshold)
+        self._plot(act, lo, hi, peak, hit)
 
     def _configure_positions(self, points: int) -> None:
         self._positions = points
-        self._activity = None
+        self._baseline = None
         self.pos_spin.setMaximum(points - 1)
         for w in (self.range_lo, self.range_hi):
             w.setMaximum(points - 1)
         if self.range_hi.value() == 0:
             self.range_hi.setValue(points - 1)
 
-    def _plot(self, lo: int, hi: int, peak: int, hit: bool, threshold: float) -> None:
+    def _plot(self, act: np.ndarray, lo: int, hi: int, peak: int, hit: bool) -> None:
+        # only the watched range is drawn, so the scale isn't dominated
+        # by the always-noisy stretches outside it
+        x = np.arange(lo, hi + 1)
         self.graph_act.clear()
-        self.graph_act.addItem(self._thr_line)
         self.graph_act.addItem(self._peak_line)
-        self.graph_act.plot(self._activity, pen="#ffff00")
-        self._thr_line.setValue(threshold)
+        self.graph_act.plot(x, act[lo : hi + 1], pen="#ffff00")
+        self.graph_act.plot(
+            x,
+            self._baseline[lo : hi + 1] * self.thresh.value(),
+            pen=pg.mkPen("#ff3030", style=Qt.PenStyle.DashLine),
+        )
         if hit:
             self._peak_line.setValue(peak)
             self._peak_line.show()
