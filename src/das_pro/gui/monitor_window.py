@@ -91,7 +91,7 @@ class MonitorWindow(QWidget):
 
         bar = QHBoxLayout()
         self.ch_combo = QComboBox()
-        self.ch_combo.addItems(["CH0", "CH1"])
+        self.ch_combo.addItems(["通道0", "通道1"])
         self.pos_spin = QSpinBox()
         self.pos_spin.setRange(0, 1_000_000)
         self.pos_spin.setMinimumWidth(85)

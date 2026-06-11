@@ -49,10 +49,16 @@ followed by the payload. Payload element size depends on the data type:
 src/das_pro/
   protocol/   wire protocol: register map, command builders, frame parsing
   device/     TCP client + a board simulator (fake hardware over TCP)
-  dsp/        power-spectrum / PSD analysis matching the original demo
-  gui/        PySide6 control panel and real-time plots
+  dsp/        spectrum analysis + vibration detection (pure numpy)
+  gui/
+    main_window.py     Chinese-language main window: plots + button column
+    params.py          parameter dataclasses (no Qt) shared with dialogs
+    dialogs.py         acquisition / demod / board-IP / digital-out dialogs
+    monitor_window.py  single-point monitor: detection, audio, recording
+    region_window.py   region monitor: multi-point detection + waterfall
+    worker.py          acquisition thread (latest-wins conflation)
   app.py      entry point
-tests/        byte-level protocol tests
+tests/        byte-level protocol + detection tests
 ```
 
 ## Running without hardware
@@ -123,9 +129,13 @@ pip install -r requirements-dev.txt
 PYTHONPATH=src pytest
 ```
 
-## Single-point monitor (AudioEN)
+## Monitor windows
 
-In Phase mode the **AudioEN** checkbox opens a dedicated monitor window:
+The UI is fully in Chinese; parameters live in dialogs opened from a
+button column, keeping each feature its own module (high cohesion, low
+coupling — monitor windows only consume decoded frames via `feed()`).
+
+In Phase mode the **单点监测/音频** button opens a single-point monitor:
 
 - **automatic vibration detection** — per-position activity (std of the
   temporal phase difference) with an adaptive median-based threshold;
@@ -138,11 +148,17 @@ In Phase mode the **AudioEN** checkbox opens a dedicated monitor window:
   BIN, each with a JSON sidecar — records just one fiber position instead
   of the whole stream.
 
-The simulator injects a 50 Hz vibration at 1/3 of the fiber so the
-detector can be exercised without hardware.
+The **区域监测** button opens a region monitor: every above-threshold
+position is reported (grouped into events), a position × time waterfall
+shows where and when the fiber vibrates, and region recording saves the
+2-D block for the selected range.
+
+The simulator injects a 50 Hz vibration at 1/3 of the fiber so both
+monitors can be exercised without hardware.
 
 ## Status
 
-Milestone 2 — validated against real hardware (protocol confirmed
-byte-exact); single-point monitor with auto detection, audio and per-point
-recording. Next: waterfall view and data playback.
+Milestone 3 — Chinese UI with dialog-based parameters; single-point
+monitor (detection, audio, per-point recording) and region monitor
+(multi-point detection, waterfall, region recording). Validated against
+real hardware. Next: data playback.

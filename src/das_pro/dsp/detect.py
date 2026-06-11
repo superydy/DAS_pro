@@ -38,3 +38,31 @@ def detect_peak(
     pos = int(np.argmax(act))
     triggered = bool(act[pos] > threshold > 0.0)
     return pos, threshold, triggered
+
+
+def detect_events(
+    activity: np.ndarray, threshold_ratio: float, max_events: int = 20
+) -> tuple[list[tuple[int, float]], float]:
+    """Find every vibrating spot, not just the strongest.
+
+    Contiguous runs of above-threshold positions are grouped into one
+    event each (a vibration excites a few neighbouring positions), and
+    the run's peak represents it. Returns (events, threshold) with
+    events as (position, activity) sorted by activity, strongest first.
+    """
+    act = np.asarray(activity, dtype=np.float64)
+    if act.size == 0:
+        return [], 0.0
+    threshold = float(np.median(act)) * threshold_ratio
+    if threshold <= 0.0:
+        return [], threshold
+    mask = act > threshold
+    if not mask.any():
+        return [], threshold
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], mask.view(np.int8), [0]))))
+    events = []
+    for lo, hi in zip(edges[::2], edges[1::2]):  # hi is exclusive
+        peak = lo + int(np.argmax(act[lo:hi]))
+        events.append((peak, float(act[peak])))
+    events.sort(key=lambda e: e[1], reverse=True)
+    return events[:max_events], threshold

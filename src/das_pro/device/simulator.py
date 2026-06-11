@@ -184,7 +184,7 @@ class _Handler(socketserver.BaseRequestHandler):
             phase_t = t[-1] + dt if len(t) else phase_t
             grid = rng.normal(0, 50, size=(state.frame_num, points, ch))
             vib = points // 3
-            grid[:, vib, :] += (3000.0 * np.sin(2 * np.pi * tone_hz * t))[:, None]
+            grid[:, vib, :] += (12000.0 * np.sin(2 * np.pi * tone_hz * t))[:, None]
             grid = grid.ravel()[:total]
             if state.phase_bits_16:
                 return grid.astype("<i2").tobytes(), phase_t

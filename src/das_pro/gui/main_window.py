@@ -1,14 +1,15 @@
-"""Main application window for DAS_pro.
+"""Main application window for DAS_pro (全中文界面).
 
-Layout mirrors the original ETH_DAS_DEMO control panel:
+布局（参照手绘设计稿）：
 
-* left column   — acquisition + phase-demodulation parameters, board IP,
-                  START / QUIT buttons
-* center column — top bar (frame num, save, display index, throughput,
-                  space/time, region index) and three plots: waveform,
-                  waveform2/spectrum, amplitude monitor
-* right column  — received frame header readouts, spectrum switches,
-                  ConfUserIP and digital-output controls
+* 中部 —— 顶部工具条 + 三张大图（图1 通道0、图2 通道1/频谱、图3 幅度监测）
+* 右栏 —— 一列功能按钮（采集参数 / 相位解调 / 单点监测 / 区域监测 /
+          修改板卡IP / 数字输出）和两个常驻面板（帧信息、频谱开关）
+* 底部 —— 板卡地址、连接灯、开始采集 / 退出
+
+参数本体放在 params.py 的数据类里，由 dialogs.py 的弹窗编辑；监测窗口
+（monitor_window / region_window）只通过 feed() 接收解码后的相位帧。
+各模块互不引用，便于单独扩展。
 """
 
 from __future__ import annotations
@@ -24,9 +25,8 @@ from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
+    QDialog,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -42,13 +41,21 @@ from PySide6.QtWidgets import (
 
 from ..device.client import DasClient, DeviceError
 from ..dsp.spectrum import power_spectrum_dbm
-from ..protocol.constants import (
-    BASE_SAMPLE_RATE,
-    DEFAULT_PORT,
-    DataSrc,
-    DataType,
+from ..protocol.constants import DEFAULT_PORT, DataSrc, DataType
+from .dialogs import (
+    AcquisitionDialog,
+    ConfUserIpDialog,
+    DigitalOutDialog,
+    PhaseDemodDialog,
 )
 from .monitor_window import MonitorWindow
+from .params import (
+    AcquisitionParams,
+    PhaseDemodParams,
+    fiber_len_km,
+    throughput_mb_s,
+)
+from .region_window import RegionWindow
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
@@ -62,11 +69,16 @@ _MON_PENS = ["#ffff00", "#30c030"]
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("DAS_pro — ETH_DAS")
+        self.setWindowTitle("DAS_pro — ETH-5520 分布式声波传感上位机")
         self.resize(1400, 860)
         self.setMinimumSize(1000, 640)
 
         self.port = DEFAULT_PORT
+        self.acq = AcquisitionParams()
+        self.demod = PhaseDemodParams()
+        self._do_bit_en = 0
+        self._do_bit = 0
+
         self._client: DasClient | None = None
         self._thread: QThread | None = None
         self._worker: AcquisitionWorker | None = None
@@ -74,227 +86,92 @@ class MainWindow(QMainWindow):
         self._file_index = 0
         self._frame_count = 0
         self._monitor: MonitorWindow | None = None
+        self._region: RegionWindow | None = None
 
         self._build_ui()
-        self._on_data_src_changed()
+        self._after_params_changed()
 
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        left_inner = QWidget()
-        left_inner.setLayout(self._build_left())
-        left = QScrollArea()
-        left.setWidget(left_inner)
-        left.setWidgetResizable(True)
-        left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Width derived from actual content so fonts/DPI never clip it.
-        need = left_inner.minimumSizeHint().width() + 24  # room for scrollbar
-        left.setMinimumWidth(need)
-        left.setMaximumWidth(need + 50)
+        outer = QVBoxLayout(central)
+
+        body = QHBoxLayout()
+        body.addLayout(self._build_center(), 1)
         right = QWidget()
         right.setLayout(self._build_right())
-        right.setMinimumWidth(240)
-        right.setMaximumWidth(300)
-        root.addWidget(left, 0)
-        root.addLayout(self._build_center(), 1)
-        root.addWidget(right, 0)
-
-    # --- left column ---
-
-    def _build_left(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-
-        acq = QGroupBox("采集参数")
-        g = QGridLayout(acq)
-
-        self.trig_freq = self._spin(1, 10_000_000, 2000, " Hz")
-        self.trig_width = self._spin(1, 100000, 100, " ns")
-        self.point_num = self._spin(16, 1_000_000, 5120, step=16)
-        self.bypass_point = self._spin(0, 1_000_000, 2)
-
-        self.data_src = QComboBox()
-        self.data_src.addItem("RawData", DataSrc.RAW)
-        self.data_src.addItem("IQ", DataSrc.IQ)
-        self.data_src.addItem("Arctan&Sqrt", DataSrc.ARCTAN_SQRT)
-        self.data_src.addItem("Phase", DataSrc.PHASE)
-        self.data_src.currentIndexChanged.connect(self._on_data_src_changed)
-
-        self.upload_rate = QComboBox()
-        for sel in (1, 2, 4, 5, 10):
-            self.upload_rate.addItem(f"{int(500 / sel)}MSps", sel)
-
-        self.ch_num = QComboBox()
-        self.ch_num.addItem("One", 1)
-        self.ch_num.addItem("Two", 2)
-        self.ch_num.addItem("Four", 4)
-        self.ch_num.setCurrentIndex(1)
-
-        self.fiber_len = QLabel("0.00 Km")
-
-        self.center_freq = self._spin(0, 250, 80, " MHz")
-
-        self.trig_dir = QComboBox()
-        self.trig_dir.addItem("IN", 0)
-        self.trig_dir.addItem("OUT", 1)
-        self.trig_dir.setCurrentIndex(1)
-
-        self.clk_src = QComboBox()
-        self.clk_src.addItem("ExtRef", 0)
-        self.clk_src.addItem("OnBoard", 1)
-        self.clk_src.setCurrentIndex(1)
-
-        self.phase_bits = QComboBox()
-        self.phase_bits.addItem("32Bit", 0)
-        self.phase_bits.addItem("16Bit", 1)
-
-        self.dec_ratio = self._spin(1, 1024, 1)
-
-        rows = [
-            ("TrigFreq", self.trig_freq, "TrigWidth", self.trig_width),
-            ("TotalPointNum", self.point_num, "BypassPointNum", self.bypass_point),
-            ("DataSrc", self.data_src, "UploadRate", self.upload_rate),
-            ("UploadChNum", self.ch_num, "FiberLen", self.fiber_len),
-            ("CenterFreq", self.center_freq, "", None),
-            ("TrigDir", self.trig_dir, "ClkSrc", self.clk_src),
-            ("PhaseBit", self.phase_bits, "TrigFreqDecRatio", self.dec_ratio),
-        ]
-        for r, (l1, w1, l2, w2) in enumerate(rows):
-            g.addWidget(QLabel(l1), r * 2, 0)
-            g.addWidget(w1, r * 2 + 1, 0)
-            if w2 is not None:
-                g.addWidget(QLabel(l2), r * 2, 1)
-                g.addWidget(w2, r * 2 + 1, 1)
-        col.addWidget(acq)
-
-        demod = QGroupBox("相位解调")
-        d = QGridLayout(demod)
-        self.space_avg = self._spin(1, 1024, 25)
-        self.space_merge = self._spin(1, 1024, 25)
-        self.region_diff = self._spin(1, 1024, 2)
-        self.detrend_bw = QDoubleSpinBox()
-        self.detrend_bw.setRange(0.0, 100000.0)
-        self.detrend_bw.setValue(20.0)
-        self.detrend_bw.setSuffix(" Hz")
-        self.polar_div = QComboBox()
-        self.polar_div.addItem("DIS", 0)
-        self.polar_div.addItem("EN", 1)
-        self.rate2phase = QComboBox()
-        for sel in (1, 2, 4, 5, 10):
-            self.rate2phase.addItem(f"{int(500 / sel)}M", sel)
-        self.rate2phase.setCurrentIndex(1)
-        self.audio_en = QCheckBox("AudioEN — 单点监测/音频")
-        self.audio_en.setToolTip("打开单点监测窗口：自动识别振动点、播放声音、录制单点数据（仅 Phase 模式）")
-        self.audio_en.toggled.connect(self._on_audio_toggled)
-
-        drows = [
-            ("SpaceAvgOrder", self.space_avg, "SpaceMergePoints", self.space_merge),
-            ("RegionDiffOrder", self.region_diff, "DetrendFilterBW", self.detrend_bw),
-            ("Polarization", self.polar_div, "Rate2PhaseDem", self.rate2phase),
-        ]
-        for r, (l1, w1, l2, w2) in enumerate(drows):
-            d.addWidget(QLabel(l1), r * 2, 0)
-            d.addWidget(w1, r * 2 + 1, 0)
-            d.addWidget(QLabel(l2), r * 2, 1)
-            d.addWidget(w2, r * 2 + 1, 1)
-        d.addWidget(self.audio_en, 6, 0, 1, 2)
-        col.addWidget(demod)
-
-        conn = QGroupBox("板卡地址")
-        c = QHBoxLayout(conn)
-        self.ip_octets = [self._spin(0, 255, v) for v in (192, 168, 1, 88)]
-        for s in self.ip_octets:
-            c.addWidget(s)
-        c.addWidget(QLabel(f"PortNum:{DEFAULT_PORT}"))
-        self.led = QLabel("●")
-        self.led.setStyleSheet("color:#103010;font-size:18px")
-        c.addWidget(self.led)
-        col.addWidget(conn)
-
-        btns = QHBoxLayout()
-        self.start_btn = QPushButton("START")
-        self.start_btn.setCheckable(True)
-        self.start_btn.setMinimumHeight(42)
-        self.start_btn.setStyleSheet(
-            "QPushButton{background:#22aa22;color:white;font-weight:bold}"
-            "QPushButton:checked{background:#777777}"
-        )
-        self.start_btn.toggled.connect(self._on_start_toggled)
-        quit_btn = QPushButton("QUIT")
-        quit_btn.setMinimumHeight(42)
-        quit_btn.setStyleSheet("background:#cc3322;color:white;font-weight:bold")
-        quit_btn.clicked.connect(self.close)
-        btns.addWidget(self.start_btn)
-        btns.addWidget(quit_btn)
-        col.addLayout(btns)
-
-        col.addStretch(1)
-        return col
-
-    # --- center column ---
+        right.setMinimumWidth(250)
+        right.setMaximumWidth(310)
+        body.addWidget(right, 0)
+        outer.addLayout(body, 1)
+        outer.addLayout(self._build_bottom())
 
     def _build_center(self) -> QVBoxLayout:
         col = QVBoxLayout()
 
         self.frame_num = self._spin(1, 10000, 500)
-        self.save_en = QCheckBox("SaveData")
+        self.save_en = QCheckBox("保存数据")
         self.display_index = QComboBox()
-        self.display_index.setMinimumWidth(60)
-        self.display_index.addItem("01", 0)
-        self.display_index.addItem("23", 1)
+        self.display_index.setMinimumWidth(70)
+        self.display_index.addItem("0-1", 0)
+        self.display_index.addItem("2-3", 1)
         self.throughput_label = QLabel("0.00 MB/s")
         self.throughput_label.setMinimumWidth(90)
-        self.space_time = QCheckBox("Space")
+        self.space_time = QCheckBox("空间视图")
         self.region_index = self._spin(0, 1_000_000, 100)
 
-        # Two rows; one row does not fit once Windows display scaling
-        # shrinks the logical screen width.
-        rows = (
-            (("FrameNum", self.frame_num), ("", self.save_en),
-             ("DisplayIndex", self.display_index)),
-            (("ETH_Throught", self.throughput_label), ("", self.space_time),
-             ("RegionIndex", self.region_index)),
-        )
-        for row_items in rows:
-            bar = QHBoxLayout()
-            for label, w in row_items:
-                if label:
-                    bar.addWidget(QLabel(label))
-                bar.addWidget(w)
-                bar.addSpacing(18)
-            bar.addStretch(1)
-            col.addLayout(bar)
+        bar = QHBoxLayout()
+        for label, w in (
+            ("每包扫描数", self.frame_num),
+            ("", self.save_en),
+            ("显示通道", self.display_index),
+            ("网络速率", self.throughput_label),
+            ("", self.space_time),
+            ("观察位置", self.region_index),
+        ):
+            if label:
+                bar.addWidget(QLabel(label))
+            bar.addWidget(w)
+            bar.addSpacing(14)
+        bar.addStretch(1)
+        col.addLayout(bar)
 
-        self.graph1 = pg.PlotWidget()
-        self.graph2 = pg.PlotWidget()
+        self.graph1 = pg.PlotWidget(title="图1 · 通道0 波形")
+        self.graph2 = pg.PlotWidget(title="图2 · 通道1 波形 / 频谱")
         for gph in (self.graph1, self.graph2):
             gph.showGrid(x=True, y=True, alpha=0.3)
         col.addWidget(self.graph1, 3)
         col.addWidget(self.graph2, 3)
 
         mon_bar = QHBoxLayout()
-        mon_bar.addWidget(QLabel("AMP Monitor"))
-        self.ch0_amp_disp = QCheckBox("CH0_Amp_Disp")
+        mon_bar.addWidget(QLabel("幅度监测"))
+        self.ch0_amp_disp = QCheckBox("通道0显示")
         self.ch0_amp_disp.setChecked(True)
-        self.ch1_amp_disp = QCheckBox("CH1_Amp_Disp")
+        self.ch1_amp_disp = QCheckBox("通道1显示")
         mon_bar.addWidget(self.ch0_amp_disp)
         mon_bar.addWidget(self.ch1_amp_disp)
         mon_bar.addStretch(1)
         col.addLayout(mon_bar)
 
-        self.graph_mon = pg.PlotWidget()
+        self.graph_mon = pg.PlotWidget(title="图3 · 光纤回波强度")
         self.graph_mon.showGrid(x=True, y=True, alpha=0.3)
         col.addWidget(self.graph_mon, 2)
         return col
 
-    # --- right column ---
-
     def _build_right(self) -> QVBoxLayout:
         col = QVBoxLayout()
 
-        info = QGroupBox("帧信息 (板卡上报, 只读)")
+        self.acq_btn = QPushButton("采集参数…")
+        self.acq_btn.clicked.connect(self._on_acq_dialog)
+        self.demod_btn = QPushButton("相位解调…")
+        self.demod_btn.clicked.connect(self._on_demod_dialog)
+        for b in (self.acq_btn, self.demod_btn):
+            b.setMinimumHeight(34)
+            col.addWidget(b)
+
+        info = QGroupBox("帧信息（板卡上报，只读）")
         f = QFormLayout(info)
         self.lbl_identifier = self._readout()
         self.lbl_data_type = self._readout()
@@ -302,45 +179,67 @@ class MainWindow(QMainWindow):
         self.lbl_point_num = self._readout()
         self.lbl_read_points = self._readout()
         self.lbl_frame_cnt = self._readout()
-        f.addRow("Identifier", self.lbl_identifier)
-        f.addRow("DataType", self.lbl_data_type)
-        f.addRow("FrameNum", self.lbl_frame_num)
-        f.addRow("PointNumPerScan", self.lbl_point_num)
-        f.addRow("ReadPointsNum", self.lbl_read_points)
-        f.addRow("RecvFrameCnt", self.lbl_frame_cnt)
+        f.addRow("设备标识", self.lbl_identifier)
+        f.addRow("数据类型", self.lbl_data_type)
+        f.addRow("每包扫描数", self.lbl_frame_num)
+        f.addRow("每扫描点数", self.lbl_point_num)
+        f.addRow("实收点数", self.lbl_read_points)
+        f.addRow("累计收包", self.lbl_frame_cnt)
         col.addWidget(info)
 
         spec = QGroupBox("频谱")
         s = QHBoxLayout(spec)
-        self.spectrum_en = QCheckBox("SpectrumEn")
-        self.psd_en = QCheckBox("PSD EN")
+        self.spectrum_en = QCheckBox("频谱显示")
+        self.psd_en = QCheckBox("功率谱密度")
         s.addWidget(self.spectrum_en)
         s.addWidget(self.psd_en)
         col.addWidget(spec)
 
-        ipbox = QGroupBox("ConfUserIP")
-        i = QGridLayout(ipbox)
-        self.conf_ip_octets = [self._spin(0, 255, v) for v in (192, 168, 2, 100)]
-        for idx, sb in enumerate(self.conf_ip_octets):
-            i.addWidget(sb, 0, idx)
-        self.conf_btn = QPushButton("ConfUserIP")
+        self.monitor_btn = QPushButton("单点监测/音频…")
+        self.monitor_btn.clicked.connect(self._on_monitor)
+        self.region_btn = QPushButton("区域监测…")
+        self.region_btn.clicked.connect(self._on_region)
+        self.conf_btn = QPushButton("修改板卡IP…")
         self.conf_btn.clicked.connect(self._on_conf_user_ip)
-        i.addWidget(self.conf_btn, 1, 0, 1, 4)
-        col.addWidget(ipbox)
-
-        dobox = QGroupBox("数字输出")
-        do = QFormLayout(dobox)
-        self.do_bit_en = self._spin(0, 255, 0)
-        self.do_bit = self._spin(0, 255, 0)
-        do.addRow("DOBitEN", self.do_bit_en)
-        do.addRow("DOBit", self.do_bit)
-        self.setdo_btn = QPushButton("SetDO")
+        self.setdo_btn = QPushButton("数字输出…")
         self.setdo_btn.clicked.connect(self._on_set_do)
-        do.addRow(self.setdo_btn)
-        col.addWidget(dobox)
+        for b in (self.monitor_btn, self.region_btn, self.conf_btn, self.setdo_btn):
+            b.setMinimumHeight(34)
+            col.addWidget(b)
 
         col.addStretch(1)
         return col
+
+    def _build_bottom(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("板卡地址"))
+        self.ip_octets = [self._spin(0, 255, v) for v in (192, 168, 1, 88)]
+        for s in self.ip_octets:
+            s.setMinimumWidth(64)
+            bar.addWidget(s)
+        bar.addWidget(QLabel(f"端口:{DEFAULT_PORT}"))
+        self.led = QLabel("●")
+        self.led.setStyleSheet("color:#103010;font-size:18px")
+        bar.addWidget(self.led)
+        bar.addSpacing(20)
+
+        self.start_btn = QPushButton("开始采集")
+        self.start_btn.setCheckable(True)
+        self.start_btn.setMinimumHeight(40)
+        self.start_btn.setMinimumWidth(160)
+        self.start_btn.setStyleSheet(
+            "QPushButton{background:#22aa22;color:white;font-weight:bold}"
+            "QPushButton:checked{background:#777777}"
+        )
+        self.start_btn.toggled.connect(self._on_start_toggled)
+        quit_btn = QPushButton("退出")
+        quit_btn.setMinimumHeight(40)
+        quit_btn.setMinimumWidth(100)
+        quit_btn.setStyleSheet("background:#cc3322;color:white;font-weight:bold")
+        quit_btn.clicked.connect(self.close)
+        bar.addWidget(self.start_btn, 1)
+        bar.addWidget(quit_btn)
+        return bar
 
     @staticmethod
     def _spin(lo, hi, val, suffix="", step=1) -> QSpinBox:
@@ -358,9 +257,70 @@ class MainWindow(QMainWindow):
         e = QLineEdit("0")
         e.setReadOnly(True)
         e.setAlignment(Qt.AlignmentFlag.AlignRight)
-        e.setMaximumWidth(110)
+        e.setMaximumWidth(120)
         e.setStyleSheet("background:#f4f4f4")
         return e
+
+    # ----------------------------------------------------- param dialogs
+
+    def _locked(self) -> bool:
+        return self._client is not None
+
+    def _on_acq_dialog(self) -> None:
+        dlg = AcquisitionDialog(self.acq, self.demod, self._locked(), self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and not self._locked():
+            self.acq = dlg.values()
+            self._after_params_changed()
+
+    def _on_demod_dialog(self) -> None:
+        dlg = PhaseDemodDialog(self.demod, self._locked(), self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and not self._locked():
+            self.demod = dlg.values()
+            self._after_params_changed()
+
+    def _after_params_changed(self) -> None:
+        is_phase = self.acq.is_phase
+        self.space_time.setEnabled(is_phase)
+        self.monitor_btn.setEnabled(is_phase)
+        self.region_btn.setEnabled(is_phase)
+        tip = "" if is_phase else "数据源选“相位解调”后可用（采集参数里设置）"
+        self.monitor_btn.setToolTip(tip)
+        self.region_btn.setToolTip(tip)
+        if not is_phase:
+            self.space_time.setChecked(False)
+            for w in (self._monitor, self._region):
+                if w is not None:
+                    w.close()
+        self._update_throughput()
+        self.statusBar().showMessage(
+            f"光纤长度（计算值）: {fiber_len_km(self.acq, self.demod):.2f} Km"
+        )
+
+    def _update_throughput(self) -> None:
+        self.throughput_label.setText(
+            f"{throughput_mb_s(self.acq, self.demod):.2f} MB/s"
+        )
+
+    # ------------------------------------------------- monitor windows
+
+    def _on_monitor(self) -> None:
+        if self._monitor is None:
+            self._monitor = MonitorWindow(self._save_dir(), self)
+        self._monitor.set_stream(self.acq.phase_sample_rate)
+        self._monitor.show()
+        self._monitor.raise_()
+
+    def _on_region(self) -> None:
+        if self._region is None:
+            self._region = RegionWindow(self._save_dir(), self)
+        self._region.set_stream(self.acq.phase_sample_rate)
+        self._region.show()
+        self._region.raise_()
+
+    def _feed_targets(self):
+        for w in (self._monitor, self._region):
+            if w is not None and w.isVisible():
+                yield w
 
     # ----------------------------------------------------------- behavior
 
@@ -371,33 +331,6 @@ class MainWindow(QMainWindow):
         self.led.setStyleSheet(
             f"color:{'#30ff30' if on else '#103010'};font-size:18px"
         )
-
-    def _on_data_src_changed(self) -> None:
-        is_phase = self.data_src.currentData() == DataSrc.PHASE
-        self.space_time.setEnabled(is_phase)
-        self.audio_en.setEnabled(is_phase)
-        if not is_phase:
-            self.space_time.setChecked(False)
-            self.audio_en.setChecked(False)
-
-    def _on_audio_toggled(self, checked: bool) -> None:
-        if checked:
-            if self._monitor is None:
-                self._monitor = MonitorWindow(self._save_dir(), self)
-                self._monitor.closed.connect(
-                    lambda: self.audio_en.setChecked(False)
-                )
-            self._monitor.set_stream(self._phase_sample_rate())
-            self._monitor.show()
-            self._monitor.raise_()
-        elif self._monitor is not None:
-            self._monitor.close()  # finalizes any single-point recording
-
-    def _current_sample_rate(self) -> float:
-        return BASE_SAMPLE_RATE / max(self.upload_rate.currentData(), 1)
-
-    def _phase_sample_rate(self) -> float:
-        return self.trig_freq.value() / max(self.dec_ratio.value(), 1)
 
     def _on_start_toggled(self, checked: bool) -> None:
         if checked:
@@ -420,50 +353,52 @@ class MainWindow(QMainWindow):
         self._frame_count = 0
         self._set_led(True)
         self._update_throughput()
-        self._update_fiber_len()
-        if self._monitor is not None:
-            self._monitor.set_stream(self._phase_sample_rate())
+        for w in self._feed_targets():
+            w.set_stream(self.acq.phase_sample_rate)
 
         if self.save_en.isChecked():
             self._open_recording()
 
         settings = StreamSettings(
-            upload_ch_num=self.ch_num.currentData(),
-            phase_bits_16=self.phase_bits.currentData() == 1,
-            data_src=int(self.data_src.currentData()),
+            upload_ch_num=self.acq.ch_num,
+            phase_bits_16=self.acq.phase_bits_16,
+            data_src=self.acq.data_src,
         )
         self._thread = QThread()
-        self._worker = AcquisitionWorker(client, settings, record_file=self._recording_file)
+        self._worker = AcquisitionWorker(
+            client, settings, record_file=self._recording_file
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.frame_ready.connect(self._on_frame_ready)
         self._worker.error.connect(self._on_worker_error)
         self._worker.finished.connect(self._thread.quit)
         self._thread.start()
-        self.start_btn.setText("STOP")
+        self.start_btn.setText("停止采集")
         self._set_adhoc_enabled(False)
 
     def _configure_board(self, client: DasClient) -> None:
-        client.set_clock_src(self.clk_src.currentData())
-        client.set_trig_dir(self.trig_dir.currentData())
-        client.set_trig_freq(self.trig_freq.value())
-        client.set_trig_pulse_width(self.trig_width.value())
-        client.set_point_num_per_scan(self.point_num.value())
-        client.set_bypass_point_num(self.bypass_point.value())
-        client.set_upload_ch_num(self.ch_num.currentData())
-        client.set_upload_data_src(int(self.data_src.currentData()))
-        client.set_upload_data_rate(self.upload_rate.currentData())
-        client.set_center_freq(self.center_freq.value() * 1_000_000)
+        a, d = self.acq, self.demod
+        client.set_clock_src(a.clk_src)
+        client.set_trig_dir(a.trig_dir)
+        client.set_trig_freq(a.trig_freq)
+        client.set_trig_pulse_width(a.trig_width)
+        client.set_point_num_per_scan(a.point_num)
+        client.set_bypass_point_num(a.bypass_point)
+        client.set_upload_ch_num(a.ch_num)
+        client.set_upload_data_src(a.data_src)
+        client.set_upload_data_rate(a.upload_rate_sel)
+        client.set_center_freq(a.center_freq_mhz * 1_000_000)
         client.set_phase_demod_params(
-            data_rate_to_phase_dem=self.rate2phase.currentData(),
-            space_avg_order=self.space_avg.value(),
-            space_merge_point_num=self.space_merge.value(),
-            space_region_diff_order=self.region_diff.value(),
-            detrend_filter_bw=self.detrend_bw.value(),
-            polarization_diversity_en=self.polar_div.currentData(),
+            data_rate_to_phase_dem=d.rate2phase_sel,
+            space_avg_order=d.space_avg,
+            space_merge_point_num=d.space_merge,
+            space_region_diff_order=d.region_diff,
+            detrend_filter_bw=d.detrend_bw,
+            polarization_diversity_en=d.polar_div,
         )
-        client.set_phase_upload_bit(self.phase_bits.currentData())
-        client.set_phase_upload_dec_ratio(self.dec_ratio.value())
+        client.set_phase_upload_bit(1 if a.phase_bits_16 else 0)
+        client.set_phase_upload_dec_ratio(a.dec_ratio)
 
     def _stop(self) -> None:
         if self._worker is not None:
@@ -483,28 +418,10 @@ class MainWindow(QMainWindow):
             self._client = None
         self._close_recording()
         self._set_led(False)
-        self.start_btn.setText("START")
+        self.start_btn.setText("开始采集")
         if self.start_btn.isChecked():
             self.start_btn.setChecked(False)
         self._set_adhoc_enabled(True)
-
-    def _update_throughput(self) -> None:
-        ch = self.ch_num.currentData()
-        if self.data_src.currentData() != DataSrc.PHASE:
-            mbps = self.trig_freq.value() * self.point_num.value() * 2 * ch / 1024 / 1024
-        else:
-            byte_per_phase = 2 if self.phase_bits.currentData() == 1 else 4
-            merged = max(self.point_num.value() // max(self.space_merge.value(), 1), 1)
-            mbps = self._phase_sample_rate() * merged * byte_per_phase * ch / 1024 / 1024
-        self.throughput_label.setText(f"{mbps:.2f} MB/s")
-
-    def _update_fiber_len(self) -> None:
-        # 0.2 m per sample at 500 MSps (round trip), as computed by the demo.
-        if self.data_src.currentData() != DataSrc.PHASE:
-            km = self.point_num.value() * self.upload_rate.currentData() * 0.2 / 1000.0
-        else:
-            km = self.point_num.value() * self.rate2phase.currentData() * 0.4 / 1000.0
-        self.fiber_len.setText(f"{km:.2f} Km")
 
     # --- ad-hoc commands (connect, send, disconnect — like the demo) ---
 
@@ -518,41 +435,49 @@ class MainWindow(QMainWindow):
             return None
 
     def _set_adhoc_enabled(self, enabled: bool) -> None:
-        tip = "" if enabled else "采集运行中不可用，请先 STOP"
+        tip = "" if enabled else "采集运行中不可用，请先停止采集"
         for btn in (self.conf_btn, self.setdo_btn):
             btn.setEnabled(enabled)
             btn.setToolTip(tip)
 
     def _on_conf_user_ip(self) -> None:
+        octets = tuple(s.value() for s in self.ip_octets[:2]) + (2, 100)
+        dlg = ConfUserIpDialog(octets, self._locked(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or self._locked():
+            return
         client = self._adhoc_client()
         if client is None:
             return
         try:
-            client.conf_user_ip(*(s.value() for s in self.conf_ip_octets))
+            client.conf_user_ip(*dlg.values())
         except (DeviceError, OSError) as exc:
-            QMessageBox.warning(self, "ConfUserIP", str(exc))
+            QMessageBox.warning(self, "修改板卡IP", str(exc))
         else:
-            new_ip = ".".join(str(s.value()) for s in self.conf_ip_octets)
+            new_ip = ".".join(str(v) for v in dlg.values())
             QMessageBox.information(
                 self,
-                "ConfUserIP",
+                "修改板卡IP",
                 f"修改命令已发送，板卡新地址：{new_ip}\n\n"
                 "请注意：\n"
                 "1. 新 IP 一般在板卡重新上电后生效；\n"
-                "2. 左下角的连接地址需同步改为新 IP；\n"
+                "2. 底部的连接地址需同步改为新 IP；\n"
                 "3. 新 IP 不能与电脑自身 IP 相同。",
             )
         finally:
             client.close()
 
     def _on_set_do(self) -> None:
+        dlg = DigitalOutDialog(self._do_bit_en, self._do_bit, self._locked(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or self._locked():
+            return
+        self._do_bit_en, self._do_bit = dlg.values()
         client = self._adhoc_client()
         if client is None:
             return
         try:
-            client.set_do_bit(self.do_bit_en.value(), self.do_bit.value())
+            client.set_do_bit(self._do_bit_en, self._do_bit)
         except (DeviceError, OSError) as exc:
-            QMessageBox.warning(self, "SetDO", str(exc))
+            QMessageBox.warning(self, "数字输出", str(exc))
         finally:
             client.close()
 
@@ -581,47 +506,46 @@ class MainWindow(QMainWindow):
 
     def _recording_metadata(self) -> dict:
         """Everything needed to interpret the .bin afterwards."""
-        is_phase = self.data_src.currentData() == DataSrc.PHASE
-        if not is_phase:
+        a, d = self.acq, self.demod
+        if not a.is_phase:
             dtype = "<i2"
-            points_per_scan = self.point_num.value()
-            sample_rate_hz = self._current_sample_rate()
+            points_per_scan = a.point_num
+            sample_rate_hz = a.sample_rate
         else:
-            dtype = "<i2" if self.phase_bits.currentData() == 1 else "<i4"
-            points_per_scan = max(
-                self.point_num.value() // max(self.space_merge.value(), 1), 1
-            )
-            sample_rate_hz = self._phase_sample_rate()
-        channels = self.ch_num.currentData()
+            dtype = "<i2" if a.phase_bits_16 else "<i4"
+            points_per_scan = max(a.point_num // max(d.space_merge, 1), 1)
+            sample_rate_hz = a.phase_sample_rate
         return {
             "software": "DAS_pro",
             "board": "ETH-5520",
             "started_at": datetime.now().isoformat(timespec="seconds"),
-            "data_src": self.data_src.currentText(),
-            "data_src_value": int(self.data_src.currentData()),
+            "data_src": {0: "raw", 2: "iq", 3: "arctan_sqrt", 4: "phase"}.get(
+                a.data_src, str(a.data_src)
+            ),
+            "data_src_value": a.data_src,
             "dtype": dtype,
-            "channels": channels,
+            "channels": a.ch_num,
             "points_per_scan": points_per_scan,
             "scans_per_upload": self.frame_num.value(),
             "sample_rate_hz": sample_rate_hz,
-            "trig_freq_hz": self.trig_freq.value(),
-            "trig_pulse_width_ns": self.trig_width.value(),
-            "total_point_num": self.point_num.value(),
-            "bypass_point_num": self.bypass_point.value(),
-            "upload_rate_sel": self.upload_rate.currentData(),
-            "center_freq_hz": self.center_freq.value() * 1_000_000,
-            "phase_bits": self.phase_bits.currentText(),
-            "trig_freq_dec_ratio": self.dec_ratio.value(),
-            "space_avg_order": self.space_avg.value(),
-            "space_merge_points": self.space_merge.value(),
-            "region_diff_order": self.region_diff.value(),
-            "detrend_filter_bw_hz": self.detrend_bw.value(),
-            "polarization_diversity": self.polar_div.currentText(),
-            "fiber_len_km": float(self.fiber_len.text().split()[0]),
+            "trig_freq_hz": a.trig_freq,
+            "trig_pulse_width_ns": a.trig_width,
+            "total_point_num": a.point_num,
+            "bypass_point_num": a.bypass_point,
+            "upload_rate_sel": a.upload_rate_sel,
+            "center_freq_hz": a.center_freq_mhz * 1_000_000,
+            "phase_bits": "16Bit" if a.phase_bits_16 else "32Bit",
+            "trig_freq_dec_ratio": a.dec_ratio,
+            "space_avg_order": d.space_avg,
+            "space_merge_points": d.space_merge,
+            "region_diff_order": d.region_diff,
+            "detrend_filter_bw_hz": d.detrend_bw,
+            "polarization_diversity": "EN" if d.polar_div else "DIS",
+            "fiber_len_km": fiber_len_km(a, d),
             "layout": "scan-major; channels interleaved per point",
             "numpy_example": (
                 f"np.fromfile(f, dtype='{dtype}')"
-                f".reshape(-1, {points_per_scan}, {channels})"
+                f".reshape(-1, {points_per_scan}, {a.ch_num})"
             ),
         }
 
@@ -636,7 +560,9 @@ class MainWindow(QMainWindow):
             self._meta["stopped_at"] = datetime.now().isoformat(timespec="seconds")
             self._meta["frames_received"] = self._frame_count
             self._write_meta()
-            self.statusBar().showMessage(f"录制完成: {os.path.abspath(self._meta_path).replace('.json', '.bin')}")
+            self.statusBar().showMessage(
+                f"录制完成: {os.path.abspath(self._meta_path).replace('.json', '.bin')}"
+            )
 
     # --- frame handling ---
 
@@ -650,7 +576,7 @@ class MainWindow(QMainWindow):
         self._on_frame(*item)
 
     def _on_frame(self, header, data) -> None:
-        ch = self.ch_num.currentData()
+        ch = self.acq.ch_num
 
         self.lbl_identifier.setText(str(header.identifier))
         self.lbl_data_type.setText(str(header.data_type))
@@ -660,18 +586,14 @@ class MainWindow(QMainWindow):
         if header.data_type <= DataType.PHASE:
             self.lbl_frame_cnt.setText(str(self._frame_count))
 
-        if (
-            header.data_type == DataType.PHASE
-            and self._monitor is not None
-            and self._monitor.isVisible()
-        ):
+        if header.data_type == DataType.PHASE:
             points = header.point_num_per_ch_per_scan
             expected = header.frame_num * points * ch
             arr = np.asarray(data)
             if arr.size >= expected:
-                self._monitor.feed(
-                    arr[:expected].reshape(header.frame_num, points, ch)
-                )
+                scans = arr[:expected].reshape(header.frame_num, points, ch)
+                for w in self._feed_targets():
+                    w.feed(scans)
 
         if self._recording_file is not None:
             return  # recording runs in the worker; skip plotting for throughput
@@ -690,7 +612,7 @@ class MainWindow(QMainWindow):
         points = header.point_num_per_ch_per_scan
         channels = deinterleave(np.asarray(data), ch)
         if ch == 4:
-            # DisplayIndex selects channel pair 0/1 or 2/3 (4-channel IQ mode).
+            # 显示通道 selects channel pair 0/1 or 2/3 (4-channel IQ mode).
             base = self.display_index.currentData() * 2
             channels = [channels[base], channels[base + 1]]
 
@@ -700,7 +622,7 @@ class MainWindow(QMainWindow):
         self.graph2.clear()
         if self.spectrum_en.isChecked():
             spec, df = power_spectrum_dbm(
-                channels[0][:points], self._current_sample_rate(), self.psd_en.isChecked()
+                channels[0][:points], self.acq.sample_rate, self.psd_en.isChecked()
             )
             self.graph2.plot(np.arange(len(spec)) * df, spec, pen=_PLOT_PENS[0])
         elif len(channels) > 1:
@@ -724,7 +646,7 @@ class MainWindow(QMainWindow):
                 self.graph2.plot(scans[i, :, 1], pen=_PLOT_PENS[i])
 
     def _plot_space(self, data, header, ch) -> None:
-        """Phase, space mode: time series at RegionIndex across scans."""
+        """Phase, space mode: time series at 观察位置 across scans."""
         points = header.point_num_per_ch_per_scan
         arr = np.asarray(data)
         expected = header.frame_num * points * ch
@@ -740,7 +662,7 @@ class MainWindow(QMainWindow):
             self.graph2.plot(series[:, 1], pen=_PLOT_PENS[1])
         else:
             spec, df = power_spectrum_dbm(
-                series[:, 0], self._phase_sample_rate(), self.psd_en.isChecked()
+                series[:, 0], self.acq.phase_sample_rate, self.psd_en.isChecked()
             )
             self.graph2.plot(np.arange(len(spec)) * df, spec, pen=_PLOT_PENS[1])
 
@@ -758,6 +680,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._stop()
-        if self._monitor is not None:
-            self._monitor.close()
+        for w in (self._monitor, self._region):
+            if w is not None:
+                w.close()
         super().closeEvent(event)
