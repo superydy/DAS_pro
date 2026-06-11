@@ -176,15 +176,16 @@ class _Handler(socketserver.BaseRequestHandler):
         fs = state.sample_rate
 
         if data_type == DataType.PHASE:
-            # A drifting tone plus noise, per merged spatial point.
+            # Quiet fiber everywhere except one vibrating spot at 1/3 of
+            # the length — lets the single-point detector be demonstrated.
             tone_hz = 50.0
             dt = 1.0 / max(state.trig_freq / max(state.dec_ratio, 1), 1.0)
             t = phase_t + np.arange(state.frame_num) * dt
             phase_t = t[-1] + dt if len(t) else phase_t
-            base = (3000.0 * np.sin(2 * np.pi * tone_hz * t)).astype(np.float64)
-            # Broadcast across spatial points/channels with mild per-point offset.
-            grid = np.tile(base[:, None], (1, points * ch)).ravel()[:total]
-            grid = grid + rng.normal(0, 50, size=total)
+            grid = rng.normal(0, 50, size=(state.frame_num, points, ch))
+            vib = points // 3
+            grid[:, vib, :] += (3000.0 * np.sin(2 * np.pi * tone_hz * t))[:, None]
+            grid = grid.ravel()[:total]
             if state.phase_bits_16:
                 return grid.astype("<i2").tobytes(), phase_t
             return grid.astype("<i4").tobytes(), phase_t

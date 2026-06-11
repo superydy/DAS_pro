@@ -48,6 +48,7 @@ from ..protocol.constants import (
     DataSrc,
     DataType,
 )
+from .monitor_window import MonitorWindow
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
         self._recording_file = None
         self._file_index = 0
         self._frame_count = 0
+        self._monitor: MonitorWindow | None = None
 
         self._build_ui()
         self._on_data_src_changed()
@@ -183,9 +185,9 @@ class MainWindow(QMainWindow):
         for sel in (1, 2, 4, 5, 10):
             self.rate2phase.addItem(f"{int(500 / sel)}M", sel)
         self.rate2phase.setCurrentIndex(1)
-        self.audio_en = QCheckBox("AudioEN")
-        self.audio_en.setEnabled(False)
-        self.audio_en.setToolTip("音频播放将在后续版本提供")
+        self.audio_en = QCheckBox("AudioEN — 单点监测/音频")
+        self.audio_en.setToolTip("打开单点监测窗口：自动识别振动点、播放声音、录制单点数据（仅 Phase 模式）")
+        self.audio_en.toggled.connect(self._on_audio_toggled)
 
         drows = [
             ("SpaceAvgOrder", self.space_avg, "SpaceMergePoints", self.space_merge),
@@ -373,8 +375,23 @@ class MainWindow(QMainWindow):
     def _on_data_src_changed(self) -> None:
         is_phase = self.data_src.currentData() == DataSrc.PHASE
         self.space_time.setEnabled(is_phase)
+        self.audio_en.setEnabled(is_phase)
         if not is_phase:
             self.space_time.setChecked(False)
+            self.audio_en.setChecked(False)
+
+    def _on_audio_toggled(self, checked: bool) -> None:
+        if checked:
+            if self._monitor is None:
+                self._monitor = MonitorWindow(self._save_dir(), self)
+                self._monitor.closed.connect(
+                    lambda: self.audio_en.setChecked(False)
+                )
+            self._monitor.set_stream(self._phase_sample_rate())
+            self._monitor.show()
+            self._monitor.raise_()
+        elif self._monitor is not None:
+            self._monitor.close()  # finalizes any single-point recording
 
     def _current_sample_rate(self) -> float:
         return BASE_SAMPLE_RATE / max(self.upload_rate.currentData(), 1)
@@ -404,6 +421,8 @@ class MainWindow(QMainWindow):
         self._set_led(True)
         self._update_throughput()
         self._update_fiber_len()
+        if self._monitor is not None:
+            self._monitor.set_stream(self._phase_sample_rate())
 
         if self.save_en.isChecked():
             self._open_recording()
@@ -641,6 +660,19 @@ class MainWindow(QMainWindow):
         if header.data_type <= DataType.PHASE:
             self.lbl_frame_cnt.setText(str(self._frame_count))
 
+        if (
+            header.data_type == DataType.PHASE
+            and self._monitor is not None
+            and self._monitor.isVisible()
+        ):
+            points = header.point_num_per_ch_per_scan
+            expected = header.frame_num * points * ch
+            arr = np.asarray(data)
+            if arr.size >= expected:
+                self._monitor.feed(
+                    arr[:expected].reshape(header.frame_num, points, ch)
+                )
+
         if self._recording_file is not None:
             return  # recording runs in the worker; skip plotting for throughput
 
@@ -726,4 +758,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._stop()
+        if self._monitor is not None:
+            self._monitor.close()
         super().closeEvent(event)

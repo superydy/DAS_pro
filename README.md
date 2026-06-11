@@ -123,9 +123,26 @@ pip install -r requirements-dev.txt
 PYTHONPATH=src pytest
 ```
 
+## Single-point monitor (AudioEN)
+
+In Phase mode the **AudioEN** checkbox opens a dedicated monitor window:
+
+- **automatic vibration detection** — per-position activity (std of the
+  temporal phase difference) with an adaptive median-based threshold;
+  the strongest position is flagged and can be tracked automatically;
+- live plots of the monitored point: activity vs position, time waveform,
+  spectrum;
+- **audio playback** of the point through the speakers (QtMultimedia,
+  upsampled when the phase rate is below what the sound card accepts);
+- **single-point recording** to a user-chosen path as WAV / CSV / float32
+  BIN, each with a JSON sidecar — records just one fiber position instead
+  of the whole stream.
+
+The simulator injects a 50 Hz vibration at 1/3 of the fiber so the
+detector can be exercised without hardware.
+
 ## Status
 
-Milestone 1 — framework complete and runnable end-to-end against the simulator:
-full control surface, three real-time plots, spectrum/PSD analysis, data
-recording. Next: validate against real hardware, then add waterfall view,
-data playback and audio output.
+Milestone 2 — validated against real hardware (protocol confirmed
+byte-exact); single-point monitor with auto detection, audio and per-point
+recording. Next: waterfall view and data playback.
