@@ -321,9 +321,9 @@ class MainWindow(QMainWindow):
         self.conf_ip_octets = [self._spin(0, 255, v) for v in (192, 168, 2, 100)]
         for idx, sb in enumerate(self.conf_ip_octets):
             i.addWidget(sb, 0, idx)
-        conf_btn = QPushButton("ConfUserIP")
-        conf_btn.clicked.connect(self._on_conf_user_ip)
-        i.addWidget(conf_btn, 1, 0, 1, 4)
+        self.conf_btn = QPushButton("ConfUserIP")
+        self.conf_btn.clicked.connect(self._on_conf_user_ip)
+        i.addWidget(self.conf_btn, 1, 0, 1, 4)
         col.addWidget(ipbox)
 
         dobox = QGroupBox("数字输出")
@@ -332,9 +332,9 @@ class MainWindow(QMainWindow):
         self.do_bit = self._spin(0, 255, 0)
         do.addRow("DOBitEN", self.do_bit_en)
         do.addRow("DOBit", self.do_bit)
-        set_do_btn = QPushButton("SetDO")
-        set_do_btn.clicked.connect(self._on_set_do)
-        do.addRow(set_do_btn)
+        self.setdo_btn = QPushButton("SetDO")
+        self.setdo_btn.clicked.connect(self._on_set_do)
+        do.addRow(self.setdo_btn)
         col.addWidget(dobox)
 
         col.addStretch(1)
@@ -422,6 +422,7 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._thread.quit)
         self._thread.start()
         self.start_btn.setText("STOP")
+        self._set_adhoc_enabled(False)
 
     def _configure_board(self, client: DasClient) -> None:
         client.set_clock_src(self.clk_src.currentData())
@@ -466,6 +467,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setText("START")
         if self.start_btn.isChecked():
             self.start_btn.setChecked(False)
+        self._set_adhoc_enabled(True)
 
     def _update_throughput(self) -> None:
         ch = self.ch_num.currentData()
@@ -496,6 +498,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "连接失败", str(exc))
             return None
 
+    def _set_adhoc_enabled(self, enabled: bool) -> None:
+        tip = "" if enabled else "采集运行中不可用，请先 STOP"
+        for btn in (self.conf_btn, self.setdo_btn):
+            btn.setEnabled(enabled)
+            btn.setToolTip(tip)
+
     def _on_conf_user_ip(self) -> None:
         client = self._adhoc_client()
         if client is None:
@@ -504,6 +512,17 @@ class MainWindow(QMainWindow):
             client.conf_user_ip(*(s.value() for s in self.conf_ip_octets))
         except (DeviceError, OSError) as exc:
             QMessageBox.warning(self, "ConfUserIP", str(exc))
+        else:
+            new_ip = ".".join(str(s.value()) for s in self.conf_ip_octets)
+            QMessageBox.information(
+                self,
+                "ConfUserIP",
+                f"修改命令已发送，板卡新地址：{new_ip}\n\n"
+                "请注意：\n"
+                "1. 新 IP 一般在板卡重新上电后生效；\n"
+                "2. 左下角的连接地址需同步改为新 IP；\n"
+                "3. 新 IP 不能与电脑自身 IP 相同。",
+            )
         finally:
             client.close()
 
