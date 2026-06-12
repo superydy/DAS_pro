@@ -278,7 +278,7 @@ class MonitorWindow(QWidget):
         # saturates the GUI thread and the whole app stutters; audio and
         # recording above still run for every delivered frame
         now = time.monotonic()
-        if now - self._last_draw >= 0.15:
+        if now - self._last_draw >= 0.1:
             self._last_draw = now
             self._plot(act, lo, hi, peak, hit)
 

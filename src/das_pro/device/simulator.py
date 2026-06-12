@@ -160,6 +160,22 @@ class _Handler(socketserver.BaseRequestHandler):
                 sock.sendall(header.pack())
                 sock.sendall(payload)
 
+                if data_type == DataType.PHASE:
+                    # the real board interleaves an amp-monitor packet
+                    # (frame_num=1) after each phase upload
+                    mon_points = state.point_num_after_merge
+                    mon = FrameHeader(
+                        identifier=0x5520,
+                        data_type=int(DataType.AMP_MONITOR),
+                        frame_num=1,
+                        point_num_per_ch_per_scan=mon_points,
+                    )
+                    mon_payload = (
+                        rng.random(mon_points * state.upload_ch_num) * 4000 + 1000
+                    ).astype("<u4")
+                    sock.sendall(mon.pack())
+                    sock.sendall(mon_payload.tobytes())
+
                 # Pace the stream loosely by the trigger rate so the GUI stays responsive.
                 time.sleep(min(max(state.frame_num / max(state.trig_freq, 1), 0.02), 0.2))
         except (ConnectionError, OSError):

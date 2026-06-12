@@ -60,7 +60,7 @@ from .plotutil import make_zoomable, set_labels as _label
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
 # Shown in the title bar so the running build is identifiable at a glance.
-APP_VERSION = "v16"
+APP_VERSION = "v17"
 
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
 pg.setConfigOptions(antialias=False, background="k", foreground="#d0d0d0")
@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         self._file_index = 0
         self._frame_count = 0
         self._monitor: MonitorWindow | None = None
-        self._last_draw = 0.0
+        self._last_draw: dict[int, float] = {}  # per data type
 
         # measured (not estimated) stream rate, polled once a second
         self._stats_timer = QTimer(self)
@@ -622,11 +622,12 @@ class MainWindow(QMainWindow):
     def _on_frame_ready(self) -> None:
         if self._worker is None:
             return
-        item, recv_count = self._worker.take_latest()
-        if item is None:
+        items, recv_count = self._worker.take_latest()
+        if not items:
             return
         self._frame_count = recv_count
-        self._on_frame(*item)
+        for header, data in items:
+            self._on_frame(header, data)
 
     def _on_frame(self, header, data) -> None:
         ch = self.acq.ch_num
@@ -654,9 +655,9 @@ class MainWindow(QMainWindow):
         # cap redraw rate: at high frame rates plotting every frame
         # saturates the GUI thread and the whole window stutters
         now = time.monotonic()
-        if now - self._last_draw < 0.07:
+        if now - self._last_draw.get(header.data_type, 0.0) < 0.05:
             return
-        self._last_draw = now
+        self._last_draw[header.data_type] = now
 
         if header.data_type == DataType.AMP_MONITOR:
             self._plot_monitor(data, ch)

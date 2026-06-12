@@ -2,12 +2,14 @@
 
 Runs the read loop off the UI thread (mirroring the demo's ReadDataThread).
 
-Frames can arrive faster than the GUI can plot them, so the worker conflates:
-it keeps only the latest frame and emits at most one pending `frame_ready`
-notification at a time. The GUI fetches the newest frame with `take_latest()`.
-Without this, queued cross-thread signals pile up unboundedly and freeze the
-UI. Recording is done here in the worker so disk capture never drops frames
-regardless of plot speed.
+Frames can arrive faster than the GUI can plot them, so the worker conflates
+— but per frame type: the board interleaves amplitude-monitor packets with
+the mass-data stream, and a single latest-frame slot lets a monitor packet
+overwrite a phase packet before the GUI fetched it, starving the phase
+display and audio. One slot per type keeps both streams flowing; at most one
+`frame_ready` notification is pending at a time and the GUI drains all slots
+with `take_latest()`. Recording is done here in the worker so disk capture
+never drops frames regardless of plot speed.
 """
 
 import threading
@@ -47,7 +49,7 @@ class AcquisitionWorker(QObject):
         self._record_file = record_file
         self._running = True
         self._lock = threading.Lock()
-        self._latest = None
+        self._latest: dict[bool, tuple] = {}  # key: is amp-monitor frame
         self._notified = False
         self._recv_count = 0
         self._byte_count = 0
@@ -61,12 +63,15 @@ class AcquisitionWorker(QObject):
             return self._recv_count, self._byte_count
 
     def take_latest(self):
-        """Return ((header, data) | None, total mass-data frames received)."""
+        """Return ([(header, data), ...], total mass-data frames received).
+
+        Drains one pending frame per type (mass data + amp monitor)."""
         with self._lock:
-            item = self._latest
+            items = list(self._latest.values())
+            self._latest.clear()
             self._notified = False
             count = self._recv_count
-        return item, count
+        return items, count
 
     def run(self) -> None:
         cfg = AcquisitionConfig(
@@ -87,7 +92,8 @@ class AcquisitionWorker(QObject):
                     self._record_file.write(np.asarray(data).tobytes())
 
                 with self._lock:
-                    self._latest = (header, data)
+                    is_monitor = header.data_type == DataType.AMP_MONITOR
+                    self._latest[is_monitor] = (header, data)
                     notify = not self._notified
                     self._notified = True
                 if notify:
