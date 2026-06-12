@@ -129,6 +129,8 @@ class AcquisitionDialog(_ParamDialog):
         self.dec_ratio = _spin(1, 1024, params.dec_ratio)
 
         self.fiber_len = QLabel()
+        self.formula = QLabel()
+        self.formula.setStyleSheet("color:#808080")
         for w in (self.point_num, self.upload_rate, self.data_src):
             sig = w.currentIndexChanged if isinstance(w, QComboBox) else w.valueChanged
             sig.connect(self._update_fiber_len)
@@ -138,7 +140,7 @@ class AcquisitionDialog(_ParamDialog):
             ("触发频率", self.trig_freq, "脉冲宽度", self.trig_width),
             ("总采样点数", self.point_num, "旁路点数", self.bypass_point),
             ("数据源", self.data_src, "上传速率", self.upload_rate),
-            ("上传通道数", self.ch_num, "光纤长度（计算值）", self.fiber_len),
+            ("上传通道数", self.ch_num, "可测量长度（采集窗口）", self.fiber_len),
             ("中心频率", self.center_freq, "上传抽取比", self.dec_ratio),
             ("触发方向", self.trig_dir, "时钟源", self.clk_src),
             ("相位位宽", self.phase_bits, "", None),
@@ -147,11 +149,29 @@ class AcquisitionDialog(_ParamDialog):
             self.add_row(r, 0, l1, w1)
             if w2 is not None:
                 self.add_row(r, 1, l2, w2)
+        self.grid.addWidget(self.formula, len(rows) * 2, 0, 1, 2)
         self.finish()
 
     def _update_fiber_len(self) -> None:
-        km = fiber_len_km(self.values(), self._demod)
+        p = self.values()
+        km = fiber_len_km(p, self._demod)
         self.fiber_len.setText(f"{km:.2f} Km")
+        # 可测量长度 = 仪器当前参数能看到的最大距离（取景框），
+        # 不是光纤实际长度；实际终点由主界面图3自动测出
+        if p.is_phase:
+            m_per_pt = 0.4 * self._demod.rate2phase_sel
+            self.formula.setText(
+                f"公式：可测量长度 = 总采样点数 × {m_per_pt:.1f} 米/点"
+                f"（相位解调，解调数据率 {int(500 / self._demod.rate2phase_sel)}M）"
+                f" = {p.point_num} × {m_per_pt:.1f} = {km:.2f} Km"
+            )
+        else:
+            m_per_pt = 0.2 * p.upload_rate_sel
+            self.formula.setText(
+                f"公式：可测量长度 = 总采样点数 × {m_per_pt:.1f} 米/点"
+                f"（原始波形，{int(500 / p.upload_rate_sel)}MSps）"
+                f" = {p.point_num} × {m_per_pt:.1f} = {km:.2f} Km"
+            )
 
     def values(self) -> AcquisitionParams:
         return AcquisitionParams(

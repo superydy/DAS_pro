@@ -99,3 +99,21 @@ def detect_relative(
     base = np.maximum(np.asarray(baseline, dtype=np.float64), 1e-9)
     ratio = act / base
     return group_events(act, ratio > threshold_ratio, max_events), ratio
+
+
+def fiber_end_index(amplitude: np.ndarray, frac: float = 0.05) -> int | None:
+    """Estimate where the light ends along the fiber (OTDR-style).
+
+    The amplitude-monitor trace is strong where backscattered light
+    returns and ~zero beyond the fiber end, so the last position above
+    `frac` of the robust maximum marks the end. Returns None when the
+    trace is empty or flat.
+    """
+    a = np.asarray(amplitude, dtype=np.float64)
+    if a.size == 0:
+        return None
+    ref = float(np.percentile(a, 95))
+    if ref <= 0.0:
+        return None
+    above = np.flatnonzero(a > ref * frac)
+    return int(above[-1]) if above.size else None

@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..device.client import DasClient, DeviceError
+from ..dsp.detect import fiber_end_index
 from ..dsp.spectrum import power_spectrum_dbm
 from ..protocol.constants import DEFAULT_PORT, DataSrc, DataType
 from .dialogs import (
@@ -60,7 +61,7 @@ from .plotutil import make_zoomable, set_labels as _label
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
 # Shown in the title bar so the running build is identifiable at a glance.
-APP_VERSION = "v19"
+APP_VERSION = "v20"
 
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
 pg.setConfigOptions(antialias=False, background="k", foreground="#d0d0d0")
@@ -178,6 +179,9 @@ class MainWindow(QMainWindow):
         self.graph_mon = pg.PlotWidget(title="图3 · 光纤回波强度")
         self.graph_mon.showGrid(x=True, y=True, alpha=0.3)
         _label(self.graph_mon, "光纤位置序号", "回波强度")
+        self._fiber_end_line = pg.InfiniteLine(
+            angle=90, pen=pg.mkPen("#30c0c0", style=Qt.PenStyle.DashLine)
+        )
         col.addWidget(self.graph_mon, 2)
         make_zoomable(self.graph_mon, "图3 · 光纤回波强度", col, 2)
         return col
@@ -745,6 +749,20 @@ class MainWindow(QMainWindow):
             self.graph_mon.plot(channels[0], pen=_MON_PENS[0])
         if ch > 1 and self.ch1_amp_disp.isChecked():
             self.graph_mon.plot(channels[1], pen=_MON_PENS[1])
+
+        # built-in OTDR-style length readout: where the light ends
+        end = fiber_end_index(np.asarray(channels[0], dtype=np.float64))
+        if end is not None and len(channels[0]) > 1:
+            km = fiber_len_km(self.acq, self.demod)
+            end_km = km * end / len(channels[0])
+            self.graph_mon.addItem(self._fiber_end_line)
+            self._fiber_end_line.setValue(end)
+            self.graph_mon.setTitle(
+                f"图3 · 光纤回波强度 — 实测光纤终点：位置 {end}"
+                f" ≈ {end_km:.2f} Km（按公式比例换算）"
+            )
+        else:
+            self.graph_mon.setTitle("图3 · 光纤回波强度")
 
     def _on_worker_error(self, message: str) -> None:
         QMessageBox.warning(self, "采集错误", message)

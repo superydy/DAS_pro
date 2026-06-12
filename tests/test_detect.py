@@ -110,3 +110,13 @@ def test_short_block_is_safe():
     assert act.shape == (30,)
     _, _, hit = detect_peak(act, 6.0)
     assert not hit
+
+
+def test_fiber_end_index():
+    from das_pro.dsp.detect import fiber_end_index
+
+    amp = np.zeros(204)
+    amp[:56] = 5e6 + np.arange(56) * 1000.0  # light up to position 55
+    assert fiber_end_index(amp) == 55
+    assert fiber_end_index(np.zeros(204)) is None
+    assert fiber_end_index(np.zeros(0)) is None
