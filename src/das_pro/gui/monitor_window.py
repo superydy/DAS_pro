@@ -259,6 +259,8 @@ class MonitorWindow(QWidget):
         if sel != self._last_sel:
             self._wave_buf = np.zeros(0)  # don't mix two positions' history
             self._last_sel = sel
+            self.graph_wave.setTitle(f"监测点时域波形 — 位置 {sel}")
+            self.graph_spec.setTitle(f"监测点频谱 — 位置 {sel}")
         series = block[:, sel]
 
         if self.rec_btn.isChecked():
