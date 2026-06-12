@@ -129,6 +129,9 @@ class MainWindow(QMainWindow):
         self.display_index.addItem("2-3", 1)
         self.throughput_label = QLabel("0.00 MB/s")
         self.throughput_label.setMinimumWidth(90)
+        self.measured_label = QLabel("实际到达 —")
+        self.measured_label.setMinimumWidth(170)
+        self.measured_label.setStyleSheet("font-weight:bold;color:#808080")
         self.space_time = QCheckBox("空间视图")
         self.region_index = self._spin(0, 1_000_000, 100)
 
@@ -138,6 +141,7 @@ class MainWindow(QMainWindow):
             ("", self.save_en),
             ("显示通道", self.display_index),
             ("网络速率", self.throughput_label),
+            ("", self.measured_label),
             ("", self.space_time),
             ("观察位置", self.region_index),
         ):
@@ -422,6 +426,8 @@ class MainWindow(QMainWindow):
             self._client = None
         self._stats_timer.stop()
         self._stats_label.setText("")
+        self.measured_label.setText("实际到达 —")
+        self.measured_label.setStyleSheet("font-weight:bold;color:#808080")
         self._close_recording()
         self._set_led(False)
         self.start_btn.setText("开始采集")
@@ -438,11 +444,34 @@ class MainWindow(QMainWindow):
         f0, b0, t0 = self._stats_prev
         now = time.monotonic()
         dt = max(now - t0, 1e-6)
-        self._stats_label.setText(
-            f"实测 {(frames - f0) / dt:.1f} 包/秒 · "
-            f"{(nbytes - b0) / dt / 1024 / 1024:.2f} MB/s"
-        )
+        pkt_s = (frames - f0) / dt
+        mb_s = (nbytes - b0) / dt / 1024 / 1024
+        expect = throughput_mb_s(self.acq, self.demod)
+        text = f"实际到达 {pkt_s:.1f} 包/秒 · {mb_s:.2f} MB/s"
+        # green = stream healthy, red = data is NOT arriving on time
+        # (a network/link/board problem, not a display problem)
+        healthy = expect <= 0 or mb_s >= expect * 0.5
+        color = "#30a030" if healthy else "#ff3030"
+        self.measured_label.setText(text)
+        self.measured_label.setStyleSheet(f"font-weight:bold;color:{color}")
+        self._stats_label.setText(text)
         self._stats_prev = (frames, nbytes, now)
+        base = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False)
+            else os.getcwd()
+        )
+        try:
+            with open(
+                os.path.join(base, "das_pro_stats.log"), "a", encoding="utf-8"
+            ) as f:
+                f.write(
+                    f"{datetime.now().strftime('%H:%M:%S')} "
+                    f"实测 {pkt_s:.1f} 包/秒 {mb_s:.3f} MB/s "
+                    f"(估算 {expect:.3f} MB/s)\n"
+                )
+        except OSError:
+            pass
 
     # --- ad-hoc commands (connect, send, disconnect — like the demo) ---
 
