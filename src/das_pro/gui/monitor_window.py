@@ -1,4 +1,4 @@
-"""Single-point monitor / audio window (opened by the AudioEN checkbox).
+"""Vibration monitor / audio window (振动监测).
 
 Receives every decoded phase frame from the main window and provides:
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import wave
 from datetime import datetime
 
@@ -25,6 +26,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QListWidget,
+    QListWidgetItem,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -61,7 +64,7 @@ class MonitorWindow(QWidget):
 
     def __init__(self, save_dir: str, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("单点监测 / 音频 — AudioEN")
+        self.setWindowTitle("振动监测 / 音频")
         self.resize(960, 780)
 
         self._default_dir = save_dir
@@ -71,6 +74,13 @@ class MonitorWindow(QWidget):
         self._warmup = 0
         self._wave_buf = np.zeros(0)
         self._last_sel = -1
+        self._last_draw = 0.0
+
+        # accumulated event log: ongoing vibrations update their row
+        # instead of spamming one row per frame
+        self._feed_count = 0
+        self._active_events: dict[int, dict] = {}
+        self._hint_item = None
 
         # audio
         self._sink = None
@@ -154,6 +164,14 @@ class MonitorWindow(QWidget):
         self._peak_line.hide()
         self.graph_act.setTitle("振动强度分布（黄=当前，红虚线=报警线；只画监测范围）")
 
+        ev_box = QGroupBox("振动事件记录（累计，最新在上；点击查看该点波形）")
+        eb = QVBoxLayout(ev_box)
+        self.event_list = QListWidget()
+        self.event_list.setMaximumHeight(96)
+        self.event_list.itemClicked.connect(self._on_event_clicked)
+        eb.addWidget(self.event_list)
+        col.addWidget(ev_box)
+
         bottom = QHBoxLayout()
 
         audio_box = QGroupBox("音频")
@@ -224,9 +242,11 @@ class MonitorWindow(QWidget):
             self.det_label.setText("正在学习背景基线…（几秒后开始检测）")
             self.det_label.setStyleSheet("font-weight:bold;color:#c08000")
         elif hit:
+            head = "、".join(str(p) for p, _ in events[:6])
+            more = f" 等{len(events)}处" if len(events) > 6 else ""
             self.det_label.setText(
-                f"⚠ 检测到振动：位置 {peak}"
-                f"（超基线 {ratio[peak]:.1f} 倍）"
+                f"⚠ 检测到 {len(events)} 处振动：{head}{more}"
+                f"（跟踪位置 {peak}，超基线 {ratio[peak]:.1f} 倍）"
             )
             self.det_label.setStyleSheet("font-weight:bold;color:#ff3030")
             if self.auto_track.isChecked() and not self.rec_btn.isChecked():
@@ -252,7 +272,15 @@ class MonitorWindow(QWidget):
         if self._sink_io is not None:
             self._play(centered)
 
-        self._plot(act, lo, hi, peak, hit)
+        self._update_event_list(events if self._warmup > _WARMUP_FEEDS else [])
+
+        # cap redraw rate: at high frame rates plotting every frame
+        # saturates the GUI thread and the whole app stutters; audio and
+        # recording above still run for every delivered frame
+        now = time.monotonic()
+        if now - self._last_draw >= 0.15:
+            self._last_draw = now
+            self._plot(act, lo, hi, peak, hit)
 
     def _configure_positions(self, points: int) -> None:
         self._positions = points
@@ -262,6 +290,58 @@ class MonitorWindow(QWidget):
             w.setMaximum(points - 1)
         if self.range_hi.value() == 0:
             self.range_hi.setValue(points - 1)
+
+    # --- accumulated event log ---
+
+    def _update_event_list(self, events: list[tuple[int, float]]) -> None:
+        """Append new vibrations as history rows; ongoing ones update in place."""
+        self._feed_count += 1
+
+        if self._hint_item is None and self.event_list.count() == 0 and not events:
+            self._hint_item = QListWidgetItem("（暂无振动事件）")
+            self._hint_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.event_list.addItem(self._hint_item)
+
+        for pos, val in events:
+            rep = next(
+                (r for r in self._active_events if abs(r - pos) <= 3), None
+            )
+            if rep is None:
+                if self._hint_item is not None:
+                    self.event_list.takeItem(self.event_list.row(self._hint_item))
+                    self._hint_item = None
+                stamp = datetime.now().strftime("%H:%M:%S")
+                item = QListWidgetItem(f"{stamp}  位置 {pos}（强度 {val:.0f}）")
+                item.setData(Qt.ItemDataRole.UserRole, pos)
+                self.event_list.insertItem(0, item)
+                self._active_events[pos] = {
+                    "item": item, "last": self._feed_count, "peak": val,
+                    "stamp": stamp,
+                }
+            else:
+                entry = self._active_events[rep]
+                entry["last"] = self._feed_count
+                if val > entry["peak"]:
+                    entry["peak"] = val
+                    entry["item"].setText(
+                        f"{entry['stamp']}  位置 {rep}（峰值强度 {val:.0f}）"
+                    )
+
+        # an event ends after a few quiet frames; its row stays as history
+        for rep in list(self._active_events):
+            if self._feed_count - self._active_events[rep]["last"] > 5:
+                del self._active_events[rep]
+
+        while self.event_list.count() > 200:
+            self.event_list.takeItem(200)
+
+    def _on_event_clicked(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data is None:
+            return
+        # inspecting a历史 position: stop auto-track so it stays put
+        self.auto_track.setChecked(False)
+        self.pos_spin.setValue(int(data))
 
     def _plot(self, act: np.ndarray, lo: int, hi: int, peak: int, hit: bool) -> None:
         # only the watched range is drawn, so the scale isn't dominated

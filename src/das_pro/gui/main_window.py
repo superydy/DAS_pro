@@ -3,12 +3,12 @@
 布局（参照手绘设计稿）：
 
 * 中部 —— 顶部工具条 + 三张大图（图1 通道0、图2 通道1/频谱、图3 幅度监测）
-* 右栏 —— 一列功能按钮（采集参数 / 相位解调 / 单点监测 / 区域监测 /
-          修改板卡IP / 数字输出）和两个常驻面板（帧信息、频谱开关）
+* 右栏 —— 一列功能按钮（采集参数 / 相位解调 / 振动监测 / 修改板卡IP /
+          数字输出）和两个常驻面板（帧信息、频谱开关）
 * 底部 —— 板卡地址、连接灯、开始采集 / 退出
 
 参数本体放在 params.py 的数据类里，由 dialogs.py 的弹窗编辑；监测窗口
-（monitor_window / region_window）只通过 feed() 接收解码后的相位帧。
+（monitor_window）只通过 feed() 接收解码后的相位帧。
 各模块互不引用，便于单独扩展。
 """
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 import numpy as np
@@ -56,7 +57,6 @@ from .params import (
     throughput_mb_s,
 )
 from .plotutil import make_zoomable, set_labels as _label
-from .region_window import RegionWindow
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
         self._file_index = 0
         self._frame_count = 0
         self._monitor: MonitorWindow | None = None
-        self._region: RegionWindow | None = None
+        self._last_draw = 0.0
 
         self._build_ui()
         self._after_params_changed()
@@ -201,15 +201,13 @@ class MainWindow(QMainWindow):
         s.addWidget(self.psd_en)
         col.addWidget(spec)
 
-        self.monitor_btn = QPushButton("单点监测/音频…")
+        self.monitor_btn = QPushButton("振动监测/音频…")
         self.monitor_btn.clicked.connect(self._on_monitor)
-        self.region_btn = QPushButton("区域监测…")
-        self.region_btn.clicked.connect(self._on_region)
         self.conf_btn = QPushButton("修改板卡IP…")
         self.conf_btn.clicked.connect(self._on_conf_user_ip)
         self.setdo_btn = QPushButton("数字输出…")
         self.setdo_btn.clicked.connect(self._on_set_do)
-        for b in (self.monitor_btn, self.region_btn, self.conf_btn, self.setdo_btn):
+        for b in (self.monitor_btn, self.conf_btn, self.setdo_btn):
             b.setMinimumHeight(34)
             col.addWidget(b)
 
@@ -288,15 +286,12 @@ class MainWindow(QMainWindow):
         is_phase = self.acq.is_phase
         self.space_time.setEnabled(is_phase)
         self.monitor_btn.setEnabled(is_phase)
-        self.region_btn.setEnabled(is_phase)
         tip = "" if is_phase else "数据源选“相位解调”后可用（采集参数里设置）"
         self.monitor_btn.setToolTip(tip)
-        self.region_btn.setToolTip(tip)
         if not is_phase:
             self.space_time.setChecked(False)
-            for w in (self._monitor, self._region):
-                if w is not None:
-                    w.close()
+            if self._monitor is not None:
+                self._monitor.close()
         self._update_throughput()
         self.statusBar().showMessage(
             f"光纤长度（计算值）: {fiber_len_km(self.acq, self.demod):.2f} Km"
@@ -316,17 +311,9 @@ class MainWindow(QMainWindow):
         self._monitor.show()
         self._monitor.raise_()
 
-    def _on_region(self) -> None:
-        if self._region is None:
-            self._region = RegionWindow(self._save_dir(), self)
-        self._region.set_stream(self.acq.phase_sample_rate)
-        self._region.show()
-        self._region.raise_()
-
     def _feed_targets(self):
-        for w in (self._monitor, self._region):
-            if w is not None and w.isVisible():
-                yield w
+        if self._monitor is not None and self._monitor.isVisible():
+            yield self._monitor
 
     # ----------------------------------------------------------- behavior
 
@@ -604,6 +591,13 @@ class MainWindow(QMainWindow):
         if self._recording_file is not None:
             return  # recording runs in the worker; skip plotting for throughput
 
+        # cap redraw rate: at high frame rates plotting every frame
+        # saturates the GUI thread and the whole window stutters
+        now = time.monotonic()
+        if now - self._last_draw < 0.07:
+            return
+        self._last_draw = now
+
         if header.data_type == DataType.AMP_MONITOR:
             self._plot_monitor(data, ch)
         elif header.data_type == DataType.PHASE and self.space_time.isChecked():
@@ -697,7 +691,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._stop()
-        for w in (self._monitor, self._region):
-            if w is not None:
-                w.close()
+        if self._monitor is not None:
+            self._monitor.close()
         super().closeEvent(event)
