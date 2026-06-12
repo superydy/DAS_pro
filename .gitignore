@@ -9,3 +9,5 @@ dist/
 save_data/
 dist/
 *.spec.bak
+das_pro_stats.log
+das_pro_error.log
