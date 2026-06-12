@@ -59,6 +59,9 @@ from .params import (
 from .plotutil import make_zoomable, set_labels as _label
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
+# Shown in the title bar so the running build is identifiable at a glance.
+APP_VERSION = "v16"
+
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
 pg.setConfigOptions(antialias=False, background="k", foreground="#d0d0d0")
 
@@ -70,7 +73,7 @@ _MON_PENS = ["#ffff00", "#30c030"]
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("DAS_pro — ETH-5520 分布式声波传感上位机")
+        self.setWindowTitle(f"DAS_pro {APP_VERSION} — ETH-5520 分布式声波传感上位机")
         self.resize(1400, 860)
         self.setMinimumSize(1000, 640)
 
