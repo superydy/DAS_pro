@@ -60,7 +60,7 @@ from .plotutil import make_zoomable, set_labels as _label
 from .worker import AcquisitionWorker, StreamSettings, deinterleave
 
 # Shown in the title bar so the running build is identifiable at a glance.
-APP_VERSION = "v18"
+APP_VERSION = "v19"
 
 # Antialiasing off: live waveforms have up to ~100k points per refresh.
 pg.setConfigOptions(antialias=False, background="k", foreground="#d0d0d0")

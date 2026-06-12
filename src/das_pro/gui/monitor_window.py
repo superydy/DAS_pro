@@ -414,9 +414,12 @@ class MonitorWindow(QWidget):
         self._sink_io = None
 
     def _play(self, centered: np.ndarray) -> None:
-        peak = float(np.max(np.abs(centered))) if centered.size else 0.0
-        self._agc = max(self._agc * 0.995, peak, 1.0)
-        scaled = centered / self._agc * 30000.0
+        # slow RMS-tracked gain: the background sets the level over a few
+        # seconds, so a knock is genuinely louder than the hiss (per-chunk
+        # peak normalization made every sound equally loud)
+        rms = float(np.sqrt(np.mean(centered**2))) if centered.size else 0.0
+        self._agc = max(0.97 * self._agc + 0.03 * (rms * 5.0), 1.0)
+        scaled = centered / self._agc * 8000.0
         if self._out_rate != int(self._fs) and centered.size > 1:
             n_out = max(int(len(scaled) * self._out_rate / self._fs), 1)
             scaled = np.interp(
