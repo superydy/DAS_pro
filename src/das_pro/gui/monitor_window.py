@@ -395,6 +395,10 @@ class MonitorWindow(QWidget):
         else:
             self._out_rate = rate
         self._sink = QAudioSink(device, fmt)
+        # ~1 s of int16 mono: frames arrive in chunks (e.g. 0.25 s every
+        # 0.25 s); the default buffer is far smaller and drains to silence
+        # between chunks
+        self._sink.setBufferSize(self._out_rate * 2)
         self._sink_io = self._sink.start()
         if self._sink_io is None:
             QMessageBox.warning(self, "音频", "音频输出启动失败")

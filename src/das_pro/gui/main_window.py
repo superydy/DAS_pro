@@ -22,7 +22,7 @@ from datetime import datetime
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -89,7 +89,16 @@ class MainWindow(QMainWindow):
         self._monitor: MonitorWindow | None = None
         self._last_draw = 0.0
 
+        # measured (not estimated) stream rate, polled once a second
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setInterval(1000)
+        self._stats_timer.timeout.connect(self._update_stats)
+        self._stats_prev = (0, 0, 0.0)
+
         self._build_ui()
+        self._stats_label = QLabel("")
+        self._stats_label.setStyleSheet("font-weight:bold")
+        self.statusBar().addPermanentWidget(self._stats_label)
         self._after_params_changed()
 
     # ------------------------------------------------------------------ UI
@@ -369,6 +378,8 @@ class MainWindow(QMainWindow):
         self._thread.start()
         self.start_btn.setText("停止采集")
         self._set_adhoc_enabled(False)
+        self._stats_prev = (0, 0, time.monotonic())
+        self._stats_timer.start()
 
     def _configure_board(self, client: DasClient) -> None:
         a, d = self.acq, self.demod
@@ -409,12 +420,29 @@ class MainWindow(QMainWindow):
                 pass
             self._client.close()
             self._client = None
+        self._stats_timer.stop()
+        self._stats_label.setText("")
         self._close_recording()
         self._set_led(False)
         self.start_btn.setText("开始采集")
         if self.start_btn.isChecked():
             self.start_btn.setChecked(False)
         self._set_adhoc_enabled(True)
+
+    def _update_stats(self) -> None:
+        """Show what is actually arriving — separates network problems
+        (numbers far below the estimate) from display problems."""
+        if self._worker is None:
+            return
+        frames, nbytes = self._worker.stats()
+        f0, b0, t0 = self._stats_prev
+        now = time.monotonic()
+        dt = max(now - t0, 1e-6)
+        self._stats_label.setText(
+            f"实测 {(frames - f0) / dt:.1f} 包/秒 · "
+            f"{(nbytes - b0) / dt / 1024 / 1024:.2f} MB/s"
+        )
+        self._stats_prev = (frames, nbytes, now)
 
     # --- ad-hoc commands (connect, send, disconnect — like the demo) ---
 

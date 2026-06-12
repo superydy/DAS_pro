@@ -50,9 +50,15 @@ class AcquisitionWorker(QObject):
         self._latest = None
         self._notified = False
         self._recv_count = 0
+        self._byte_count = 0
 
     def stop(self) -> None:
         self._running = False
+
+    def stats(self) -> tuple[int, int]:
+        """(mass-data frames received, total bytes received) so far."""
+        with self._lock:
+            return self._recv_count, self._byte_count
 
     def take_latest(self):
         """Return ((header, data) | None, total mass-data frames received)."""
@@ -75,6 +81,7 @@ class AcquisitionWorker(QObject):
 
                 if header.data_type <= DataType.PHASE:
                     self._recv_count += 1
+                self._byte_count += np.asarray(data).nbytes + 16
 
                 if self._record_file is not None:
                     self._record_file.write(np.asarray(data).tobytes())

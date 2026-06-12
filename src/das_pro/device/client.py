@@ -48,7 +48,15 @@ class DasClient:
     def connect(self) -> None:
         if self._sock is not None:
             return
-        sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # A large kernel receive buffer (set before connect so window
+        # scaling is negotiated) absorbs >1 s of stream. The board's FPGA
+        # TCP stack stalls for seconds whenever the receive window closes,
+        # so the default 64 KB buffer turns brief host hiccups into a
+        # bursty, seconds-apart packet rhythm.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+        sock.settimeout(self.timeout)
+        sock.connect((self.host, self.port))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = sock
 
